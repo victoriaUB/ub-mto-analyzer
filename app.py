@@ -1,5 +1,8 @@
+import io
 import json
 import os
+import time
+
 import requests
 import pandas as pd
 import streamlit as st
@@ -7,17 +10,19 @@ import streamlit as st
 st.set_page_config(page_title="MTO Batch Analyzer", page_icon="🔍", layout="wide",
                    initial_sidebar_state="expanded")
 st.title("MTO Batch Analyzer")
-st.caption("Batch ROI check across markets — upload a Keepa Processed file to start")
+st.caption("Upload a file with EAN / Title / Purchase price EUR — live Keepa lookup, ROI per market")
 
 # ─── CONFIG: Load / Save ──────────────────────────────────────────────────────
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
+CACHE_FILE = os.path.join(os.path.dirname(__file__), "keepa_cache.json")
 
 DEFAULTS = {
     "eur_gbp": 0.867, "eur_usd": 1.170, "usd_cad": 1.369,
     "dsf":     3.0,
     "uk_ship": 0.85,  "uk_lab": 2.58,  "uk_fba": 3.09, "uk_ref": 15.0, "uk_vat": 20.0,
     "ca_ship": 3.57,  "ca_lab": 2.58,  "ca_fba": 7.33, "ca_ref": 15.0,
+    "keepa_key": "",  "cache_hours": 24,
 }
 
 def load_config():
@@ -63,6 +68,11 @@ cfg = load_config()
 with st.sidebar:
     st.header("Parameters")
 
+    with st.expander("Keepa API", expanded=not cfg["keepa_key"]):
+        keepa_key = st.text_input("API key", value=cfg["keepa_key"], type="password", key="keepa_key")
+        cache_hours = st.number_input("Cache lookups for (hours)", value=int(cfg["cache_hours"]),
+                                      min_value=0, max_value=168, step=1, key="cache_hours")
+
     with st.expander("Exchange Rates", expanded=True):
         live = fetch_live_rates()
         if live:
@@ -95,7 +105,7 @@ with st.sidebar:
         save_config()
         st.success("Saved!")
 
-# ─── CALCULATION FUNCTIONS ────────────────────────────────────────────────────
+# ─── ROI CALCULATIONS ─────────────────────────────────────────────────────────
 
 def calc_uk(p_eur, s_gbp):
     p    = p_eur * eur_gbp
@@ -128,76 +138,302 @@ def fmt_roi(val):
     icon = "🟢" if val >= 20 else ("🟡" if val >= 10 else ("🟠" if val > 0 else "🔴"))
     return f"{icon} {val:.1f}%"
 
-# ─── MAIN: FILE UPLOAD & RESULTS ──────────────────────────────────────────────
+# ─── KEEPA CLIENT ─────────────────────────────────────────────────────────────
 
-uploaded = st.file_uploader("Upload Excel file (.xlsx)", type=["xlsx"])
-
-if uploaded:
+def get_keepa_key():
+    """Streamlit Cloud secrets take priority; sidebar input is the local fallback."""
     try:
-        df = pd.read_excel(uploaded, sheet_name="Matching Analysis", engine="openpyxl")
-    except Exception as e:
-        st.error(f"Could not read 'Matching Analysis' sheet: {e}")
-        df = None
+        if "keepa_key" in st.secrets and st.secrets["keepa_key"]:
+            return st.secrets["keepa_key"]
+    except Exception:
+        pass
+    return st.session_state.get("keepa_key", "")
 
-    if df is not None:
-        df.columns = [str(c).strip() for c in df.columns]
+KEEPA_DOMAINS = {"UK": 2, "CA": 6}
+IDX_SALES_RANK = 3      # stats array index: sales rank
+IDX_NEW = 1             # stats array index: NEW price
+IDX_BUY_BOX = 18        # stats array index: buy box incl. shipping
+BATCH_SIZE = 100
 
-        df = df[df["Market"].isin(["DIPTYQUE UK", "DIPTYQUE CA"])].copy()
-        df["_market"] = df["Market"].str.replace("DIPTYQUE ", "", regex=False)
-        df = df.dropna(subset=["Buy Box: 90d avg (local currency)", "Purchase price EUR (offer)"])
+def load_cache():
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE) as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
 
-        rows = []
-        for ean, group in df.groupby("EAN"):
-            desc         = group["Offer Description"].iloc[0]
-            purchase_val = float(group["Purchase price EUR (offer)"].iloc[0])
+def save_cache(cache):
+    with open(CACHE_FILE, "w") as f:
+        json.dump(cache, f)
 
-            row = {
-                "Product":        desc,
-                "EAN":            str(ean),
-                "Purchase (EUR)": round(purchase_val, 2),
-            }
+def stat_price(stats, arr_name, idx):
+    arr = (stats or {}).get(arr_name) or []
+    if idx < len(arr) and arr[idx] is not None and arr[idx] > 0:
+        return arr[idx] / 100.0
+    return None
 
-            uk_g = group[group["_market"] == "UK"]
-            ca_g = group[group["_market"] == "CA"]
+def stat_rank(stats, arr_name, idx):
+    arr = (stats or {}).get(arr_name) or []
+    if idx < len(arr) and arr[idx] is not None and arr[idx] > 0:
+        return int(arr[idx])
+    return None
 
-            if not uk_g.empty:
-                sell_val = float(uk_g["Buy Box: 90d avg (local currency)"].iloc[0])
-                rank_val = uk_g["Sales Rank: 30d avg"].iloc[0]
-                row["Sell UK (GBP)"] = round(sell_val, 2)
-                row["Rank UK"]       = int(rank_val) if pd.notna(rank_val) else None
-                row["ROI UK"]        = round(calc_uk(purchase_val, sell_val) * 100, 1)
+def extract_product(p):
+    """Reduce a Keepa product object to the fields we need."""
+    stats = p.get("stats") or {}
+    buybox = stat_price(stats, "avg90", IDX_BUY_BOX)
+    new_avg = stat_price(stats, "avg90", IDX_NEW)
+    return {
+        "asin": p.get("asin"),
+        "title": p.get("title"),
+        "eans": p.get("eanList") or [],
+        "buybox90": buybox,
+        "new90": new_avg,
+        "rank30": stat_rank(stats, "avg30", IDX_SALES_RANK),
+    }
+
+def keepa_request(key, domain, codes, status):
+    """One /product call for up to 100 EANs. Waits for token refill on 429."""
+    url = "https://api.keepa.com/product"
+    params = {
+        "key": key,
+        "domain": domain,
+        "code": ",".join(codes),
+        "stats": 90,
+        "history": 0,
+    }
+    for attempt in range(12):
+        r = requests.get(url, params=params, timeout=60)
+        if r.status_code == 429:
+            try:
+                refill_ms = r.json().get("refillIn", 60000)
+            except Exception:
+                refill_ms = 60000
+            wait_s = max(refill_ms / 1000.0, 5) + 1
+            status.update(label=f"Keepa tokens exhausted — waiting {int(wait_s)}s for refill…")
+            time.sleep(wait_s)
+            continue
+        r.raise_for_status()
+        return r.json()
+    raise RuntimeError("Keepa: token refill wait exceeded retry limit")
+
+def fetch_market(key, market, eans, cache, cache_hours, status):
+    """Return {ean: {...}} for one market, using cache where fresh."""
+    domain = KEEPA_DOMAINS[market]
+    now = time.time()
+    results, missing = {}, []
+    for ean in eans:
+        ck = f"{domain}:{ean}"
+        entry = cache.get(ck)
+        if entry and cache_hours > 0 and now - entry["ts"] < cache_hours * 3600:
+            results[ean] = entry["data"]
+        else:
+            missing.append(ean)
+
+    tokens_left = None
+    for i in range(0, len(missing), BATCH_SIZE):
+        batch = missing[i:i + BATCH_SIZE]
+        status.update(label=f"{market}: fetching {i + 1}–{i + len(batch)} of {len(missing)} from Keepa…")
+        data = keepa_request(key, domain, batch, status)
+        tokens_left = data.get("tokensLeft")
+        products = [extract_product(p) for p in (data.get("products") or [])]
+
+        for ean in batch:
+            matches = [p for p in products if ean in p["eans"]]
+            if not matches:
+                results[ean] = None
             else:
-                row["Sell UK (GBP)"] = None
-                row["Rank UK"]       = None
-                row["ROI UK"]        = None
+                # Prefer listings with an active buy box, then the best (lowest) sales rank
+                matches.sort(key=lambda p: (p["buybox90"] is None,
+                                            p["rank30"] if p["rank30"] is not None else 10**9))
+                best = matches[0]
+                best["n_matches"] = len(matches)
+                results[ean] = best
+            cache[f"{domain}:{ean}"] = {"ts": now, "data": results[ean]}
+        save_cache(cache)
 
-            if not ca_g.empty:
-                sell_val = float(ca_g["Buy Box: 90d avg (local currency)"].iloc[0])
-                rank_val = ca_g["Sales Rank: 30d avg"].iloc[0]
-                row["Sell CA (CAD)"] = round(sell_val, 2)
-                row["Rank CA"]       = int(rank_val) if pd.notna(rank_val) else None
-                row["ROI CA"]        = round(calc_ca(purchase_val, sell_val) * 100, 1)
-            else:
-                row["Sell CA (CAD)"] = None
-                row["Rank CA"]       = None
-                row["ROI CA"]        = None
+    return results, tokens_left
 
-            rows.append(row)
+# ─── INPUT FILE PARSING ───────────────────────────────────────────────────────
 
-        result_df = pd.DataFrame(rows)
+def normalize_ean(val):
+    if pd.isna(val):
+        return None
+    if isinstance(val, float):
+        val = str(int(val))
+    s = "".join(ch for ch in str(val).strip() if ch.isdigit())
+    if not s or len(s) < 8:
+        return None
+    if 8 < len(s) < 13:
+        s = s.zfill(13)  # Excel drops leading zeros
+    return s
 
-        for col in ["Rank UK", "Rank CA"]:
-            result_df[col] = pd.array(result_df[col], dtype=pd.Int64Dtype())
+def detect_columns(df):
+    ean_col = title_col = price_col = None
+    for c in df.columns:
+        lc = str(c).lower()
+        if ean_col is None and ("ean" in lc or "barcode" in lc or "gtin" in lc):
+            ean_col = c
+        elif title_col is None and any(w in lc for w in ("title", "desc", "product", "name")):
+            title_col = c
+        elif price_col is None and any(w in lc for w in ("price", "purchase", "eur", "cost")):
+            price_col = c
+    return ean_col, title_col, price_col
 
-        result_df["_best"] = result_df[["ROI UK", "ROI CA"]].max(axis=1)
-        result_df = result_df.sort_values("_best", ascending=False).drop(columns=["_best"]).reset_index(drop=True)
+def read_input(uploaded):
+    if uploaded.name.lower().endswith(".csv"):
+        return pd.read_csv(uploaded)
+    return pd.read_excel(uploaded, engine="openpyxl")
 
-        st.markdown(f"**{len(result_df)} products** — sorted by best ROI")
+# ─── MAIN ─────────────────────────────────────────────────────────────────────
 
-        display_df = result_df.copy()
-        display_df["ROI UK"] = display_df["ROI UK"].apply(fmt_roi)
-        display_df["ROI CA"] = display_df["ROI CA"].apply(fmt_roi)
+uploaded = st.file_uploader("Upload file with EAN, Title, Purchase price EUR", type=["xlsx", "csv"])
 
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
-else:
-    st.info("Upload a Keepa Processed Excel file above to see batch ROI results.")
+if not uploaded:
+    st.info("Upload an .xlsx or .csv with three columns: EAN, Title, Purchase price (EUR). "
+            "Column names are detected automatically.")
+    st.stop()
+
+try:
+    raw = read_input(uploaded)
+except Exception as e:
+    st.error(f"Could not read file: {e}")
+    st.stop()
+
+raw.columns = [str(c).strip() for c in raw.columns]
+ean_col, title_col, price_col = detect_columns(raw)
+
+if ean_col is None or price_col is None:
+    st.error(f"Could not detect required columns. Found: EAN → {ean_col}, "
+             f"Title → {title_col}, Price → {price_col}. "
+             "Rename your columns to include 'EAN' and 'Price'.")
+    st.stop()
+
+st.caption(f"Detected columns — EAN: **{ean_col}**, Title: **{title_col or '(none)'}**, "
+           f"Purchase price EUR: **{price_col}**")
+
+items = []
+skipped = 0
+seen = set()
+for _, r in raw.iterrows():
+    ean = normalize_ean(r[ean_col])
+    price = pd.to_numeric(r[price_col], errors="coerce")
+    if ean is None or pd.isna(price):
+        skipped += 1
+        continue
+    if ean in seen:
+        continue
+    seen.add(ean)
+    items.append({
+        "ean": ean,
+        "title": str(r[title_col]) if title_col and pd.notna(r[title_col]) else "",
+        "price_eur": float(price),
+    })
+
+if skipped:
+    st.warning(f"{skipped} row(s) skipped — missing/invalid EAN or price.")
+if not items:
+    st.error("No valid rows found.")
+    st.stop()
+
+st.markdown(f"**{len(items)} unique products** ready. "
+            f"Estimated Keepa cost: up to **{len(items) * len(KEEPA_DOMAINS)} tokens** (less with cache).")
+
+if st.button("🔍 Fetch from Keepa & Analyze", type="primary"):
+    keepa_api_key = get_keepa_key()
+    if not keepa_api_key:
+        st.error("No Keepa API key found — add it in the sidebar (local) "
+                 "or in Streamlit Cloud → App settings → Secrets as keepa_key = \"...\".")
+        st.stop()
+
+    cache = load_cache()
+    eans = [it["ean"] for it in items]
+    market_data = {}
+    tokens_left = None
+
+    with st.status("Fetching from Keepa…", expanded=False) as status:
+        for market in KEEPA_DOMAINS:
+            try:
+                market_data[market], tl = fetch_market(
+                    keepa_api_key, market, eans, cache,
+                    st.session_state["cache_hours"], status)
+                if tl is not None:
+                    tokens_left = tl
+            except requests.HTTPError as e:
+                st.error(f"Keepa error for {market}: {e} — check your API key and token balance.")
+                st.stop()
+        status.update(label="Keepa fetch complete", state="complete")
+
+    st.session_state["market_data"] = market_data
+    st.session_state["tokens_left"] = tokens_left
+    st.session_state["result_file"] = uploaded.name
+
+if "market_data" not in st.session_state:
+    st.stop()
+
+market_data = st.session_state["market_data"]
+tokens_left = st.session_state["tokens_left"]
+if st.session_state.get("result_file") != uploaded.name:
+    st.warning("Results below are from a previously fetched file — click the button above to re-fetch.")
+if tokens_left is not None:
+    st.caption(f"Keepa tokens left: {tokens_left}")
+
+rows = []
+for it in items:
+    row = {
+        "Product": it["title"],
+        "EAN": it["ean"],
+        "Purchase (EUR)": round(it["price_eur"], 2),
+    }
+    notes = []
+    for market, cur, calc in [("UK", "GBP", calc_uk), ("CA", "CAD", calc_ca)]:
+        d = market_data.get(market, {}).get(it["ean"])
+        sell = rank = roi = None
+        asin = None
+        if d:
+            asin = d["asin"]
+            rank = d["rank30"]
+            if d["buybox90"] is not None:
+                sell = d["buybox90"]
+            elif d["new90"] is not None:
+                sell = d["new90"]
+                notes.append(f"{market}: no Buy Box, used NEW avg")
+            if d.get("n_matches", 1) > 1:
+                notes.append(f"{market}: {d['n_matches']} ASINs matched")
+            if not it["title"] and d.get("title"):
+                row["Product"] = d["title"]
+        if sell is not None:
+            roi = round(calc(it["price_eur"], sell) * 100, 1)
+        row[f"ASIN {market}"] = asin
+        row[f"Sell {market} ({cur})"] = round(sell, 2) if sell is not None else None
+        row[f"Rank {market}"] = rank
+        row[f"ROI {market}"] = roi
+    row["Notes"] = "; ".join(notes)
+    rows.append(row)
+
+result_df = pd.DataFrame(rows)
+
+for col in ["Rank UK", "Rank CA"]:
+    result_df[col] = pd.array(result_df[col], dtype=pd.Int64Dtype())
+
+for col in ["ROI UK", "ROI CA"]:
+    result_df[col] = pd.to_numeric(result_df[col], errors="coerce")
+result_df["_best"] = result_df[["ROI UK", "ROI CA"]].max(axis=1)
+result_df = result_df.sort_values("_best", ascending=False).drop(columns=["_best"]).reset_index(drop=True)
+
+n_found = result_df[["ROI UK", "ROI CA"]].notna().any(axis=1).sum()
+st.markdown(f"**{len(result_df)} products** ({n_found} found on Keepa) — sorted by best ROI")
+
+display_df = result_df.copy()
+display_df["ROI UK"] = display_df["ROI UK"].apply(fmt_roi)
+display_df["ROI CA"] = display_df["ROI CA"].apply(fmt_roi)
+
+st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+buf = io.BytesIO()
+result_df.to_excel(buf, index=False, engine="openpyxl")
+st.download_button("⬇️ Download results (.xlsx)", data=buf.getvalue(),
+                   file_name="mto_analysis.xlsx",
+                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")

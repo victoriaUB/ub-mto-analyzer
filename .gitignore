@@ -1,0 +1,4 @@
+config.json
+keepa_cache.json
+__pycache__/
+.streamlit/secrets.toml
