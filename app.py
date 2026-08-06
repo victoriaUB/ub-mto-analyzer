@@ -2,7 +2,9 @@ import io
 import json
 import os
 import time
+import unicodedata
 
+import openpyxl
 import requests
 import pandas as pd
 import streamlit as st
@@ -138,6 +140,82 @@ def fmt_roi(val):
     icon = "🟢" if val >= 20 else ("🟡" if val >= 10 else ("🟠" if val > 0 else "🔴"))
     return f"{icon} {val:.1f}%"
 
+# ─── BRAND GATING MATRIX (Google Sheet) ───────────────────────────────────────
+
+BRAND_MATRIX_URL = ("https://docs.google.com/spreadsheets/d/"
+                    "1aJbNQ71fUffSAR54kf6eokShWdkY2FrSk2x7DCdwtHE/export?format=xlsx&gid=576947683")
+MATRIX_HEADERS = {"UK": "AMZ UK", "CA": "AMZ CA"}
+
+FILL_ORANGE = "FFFCE5CD"   # gated — can apply
+FILL_PINK   = "FFF4CCCC"   # hard gated
+FILL_YELLOW = "FFFFFF00"   # needs approval / see note
+
+GATE_OK, GATE_APPLY, GATE_CHECK, GATE_HARD = 0, 1, 2, 3
+GATE_LABELS = {GATE_OK: "✅ OK", GATE_APPLY: "🟠 Gated — can apply",
+               GATE_CHECK: "❓ To be checked", GATE_HARD: "🚫 Hard gated"}
+GATE_UNKNOWN = "❓ Gating status to be checked"
+
+def classify_gating(text, fill):
+    """Pink/green in the sheet come from conditional formatting on the text
+    ('Hard Gated' / 'ok'); orange 'can apply' cells carry a static fill."""
+    t = str(text).strip() if text is not None else ""
+    tl = t.lower()
+    note = "" if tl in ("", "ok", "hard gated") else t[:60]
+    if "hard gated" in tl or fill == FILL_PINK:
+        return GATE_HARD, note
+    if tl in ("ok", "ungated"):
+        return GATE_OK, note
+    if fill == FILL_ORANGE or fill == FILL_YELLOW or "apply" in tl:
+        return GATE_APPLY, note
+    if "ungated" in tl:
+        return GATE_OK, note
+    return GATE_CHECK, note
+
+def norm_brand(s):
+    return "".join(ch for ch in unicodedata.normalize("NFKD", str(s)).casefold()
+                   if ch.isalnum())
+
+@st.cache_data(ttl=900, show_spinner=False)
+def load_brand_matrix():
+    """{normalized brand: {'display': str, 'UK': (rank, note), 'CA': (rank, note)}}"""
+    r = requests.get(BRAND_MATRIX_URL, timeout=30)
+    r.raise_for_status()
+    ws = openpyxl.load_workbook(io.BytesIO(r.content)).worksheets[0]
+    cols = {}
+    for cell in ws[1]:
+        header = str(cell.value).strip().upper() if cell.value else ""
+        for market, name in MATRIX_HEADERS.items():
+            if header == name:
+                cols[market] = cell.column - 1
+    matrix = {}
+    for row in ws.iter_rows(min_row=2):
+        brand = row[0].value
+        if brand is None or not str(brand).strip():
+            continue
+        entry = {"display": str(brand).strip()}
+        for market, idx in cols.items():
+            cell = row[idx] if idx < len(row) else None
+            fill = None
+            if cell is not None and cell.fill and cell.fill.fill_type == "solid":
+                fill = str(cell.fill.start_color.rgb or "")
+            entry[market] = classify_gating(cell.value if cell is not None else None, fill)
+        matrix[norm_brand(brand)] = entry
+    return matrix
+
+def gating_for_brand(matrix, brand):
+    """Exact normalized match first, then substring either way (min 4 chars)."""
+    if not brand:
+        return None
+    nb = norm_brand(brand)
+    if not nb:
+        return None
+    if nb in matrix:
+        return matrix[nb]
+    for key, entry in matrix.items():
+        if len(key) >= 4 and len(nb) >= 4 and (key in nb or nb in key):
+            return entry
+    return None
+
 # ─── KEEPA CLIENT ─────────────────────────────────────────────────────────────
 
 def get_keepa_key():
@@ -188,6 +266,7 @@ def extract_product(p):
     return {
         "asin": p.get("asin"),
         "title": p.get("title"),
+        "brand": p.get("brand"),
         "eans": p.get("eanList") or [],
         "buybox90": buybox,
         "new90": new_avg,
@@ -225,7 +304,7 @@ def fetch_market(key, market, eans, cache, cache_hours, status):
     now = time.time()
     results, missing = {}, []
     for ean in eans:
-        ck = f"{domain}:{ean}"
+        ck = f"v2:{domain}:{ean}"
         entry = cache.get(ck)
         if entry and cache_hours > 0 and now - entry["ts"] < cache_hours * 3600:
             results[ean] = entry["data"]
@@ -251,7 +330,7 @@ def fetch_market(key, market, eans, cache, cache_hours, status):
                 best = matches[0]
                 best["n_matches"] = len(matches)
                 results[ean] = best
-            cache[f"{domain}:{ean}"] = {"ts": now, "data": results[ean]}
+            cache[f"v2:{domain}:{ean}"] = {"ts": now, "data": results[ean]}
         save_cache(cache)
 
     return results, tokens_left
@@ -380,6 +459,15 @@ if st.session_state.get("result_file") != uploaded.name:
 if tokens_left is not None:
     st.caption(f"Keepa tokens left: {tokens_left}")
 
+try:
+    brand_matrix = load_brand_matrix()
+    matrix_error = None
+except Exception as e:
+    brand_matrix = {}
+    matrix_error = str(e)
+if matrix_error:
+    st.warning(f"Could not load Brand Matrix from Google Sheets — gating shown as 'to be checked'. ({matrix_error})")
+
 rows = []
 for it in items:
     row = {
@@ -388,6 +476,31 @@ for it in items:
         "Purchase (EUR)": round(it["price_eur"], 2),
     }
     notes = []
+
+    brand = None
+    for market in KEEPA_DOMAINS:
+        d = market_data.get(market, {}).get(it["ean"])
+        if d and d.get("brand"):
+            brand = d["brand"]
+            break
+    row["Brand"] = brand
+    gating = gating_for_brand(brand_matrix, brand)
+    gate_ranks = {}
+    for market in ("UK", "CA"):
+        if gating is None:
+            row[f"Gating {market}"] = GATE_UNKNOWN
+            gate_ranks[market] = GATE_CHECK
+        else:
+            rank_g, note_g = gating[market]
+            label = GATE_LABELS[rank_g]
+            if note_g:
+                label += f" ({note_g})"
+            row[f"Gating {market}"] = label
+            gate_ranks[market] = rank_g
+    row["_gate"] = min(gate_ranks.values())
+    row["_gate_uk"] = gate_ranks["UK"]
+    row["_gate_ca"] = gate_ranks["CA"]
+
     for market, cur, calc in [("UK", "GBP", calc_uk), ("CA", "CAD", calc_ca)]:
         d = market_data.get(market, {}).get(it["ean"])
         sell = rank = roi = None
@@ -420,11 +533,26 @@ for col in ["Rank UK", "Rank CA"]:
 
 for col in ["ROI UK", "ROI CA"]:
     result_df[col] = pd.to_numeric(result_df[col], errors="coerce")
-result_df["_best"] = result_df[["ROI UK", "ROI CA"]].max(axis=1)
-result_df = result_df.sort_values("_best", ascending=False).drop(columns=["_best"]).reset_index(drop=True)
+
+# Rank: sellable brands first (OK > can apply > to check > hard gated),
+# within each group by ROI CA desc, then ROI UK desc.
+# A market's ROI only counts toward ranking if the brand is sellable there
+# (OK or can-apply) — a great ROI in a hard-gated market shouldn't lift a product.
+result_df["_roi_ca"] = result_df["ROI CA"].where(result_df["_gate_ca"] <= GATE_CHECK).fillna(-10**9)
+result_df["_roi_uk"] = result_df["ROI UK"].where(result_df["_gate_uk"] <= GATE_CHECK).fillna(-10**9)
+result_df = (result_df
+             .sort_values(["_gate", "_roi_ca", "_roi_uk"], ascending=[True, False, False])
+             .drop(columns=["_gate", "_gate_uk", "_gate_ca", "_roi_ca", "_roi_uk"])
+             .reset_index(drop=True))
+
+col_order = ["Product", "Brand", "EAN", "Purchase (EUR)",
+             "ASIN CA", "Sell CA (CAD)", "Rank CA", "ROI CA", "Gating CA",
+             "ASIN UK", "Sell UK (GBP)", "Rank UK", "ROI UK", "Gating UK", "Notes"]
+result_df = result_df[[c for c in col_order if c in result_df.columns]]
 
 n_found = result_df[["ROI UK", "ROI CA"]].notna().any(axis=1).sum()
-st.markdown(f"**{len(result_df)} products** ({n_found} found on Keepa) — sorted by best ROI")
+st.markdown(f"**{len(result_df)} products** ({n_found} found on Keepa) — "
+            "sellable brands first, then by ROI CA, then ROI UK")
 
 display_df = result_df.copy()
 display_df["ROI UK"] = display_df["ROI UK"].apply(fmt_roi)
