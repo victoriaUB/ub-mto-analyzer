@@ -1,10 +1,10 @@
+import base64
 import io
 import json
 import os
 import time
 import unicodedata
 
-import openpyxl
 import requests
 import pandas as pd
 import streamlit as st
@@ -24,7 +24,7 @@ DEFAULTS = {
     "dsf":     3.0,
     "uk_ship": 0.85,  "uk_lab": 2.58,  "uk_fba": 3.09, "uk_ref": 15.0, "uk_vat": 20.0,
     "ca_ship": 3.57,  "ca_lab": 2.58,  "ca_fba": 7.33, "ca_ref": 15.0,
-    "keepa_key": "",  "cache_hours": 24,
+    "keepa_key": "",  "cache_hours": 24, "github_token": "",
 }
 
 def load_config():
@@ -68,10 +68,14 @@ cfg = load_config()
 # ─── SIDEBAR: Parameters ──────────────────────────────────────────────────────
 
 with st.sidebar:
+    page = st.radio("Page", ["🔍 Analyzer", "🏷️ Brand Matrix"], label_visibility="collapsed")
+    st.markdown("---")
     st.header("Parameters")
 
-    with st.expander("Keepa API", expanded=not cfg["keepa_key"]):
-        keepa_key = st.text_input("API key", value=cfg["keepa_key"], type="password", key="keepa_key")
+    with st.expander("API keys", expanded=not cfg["keepa_key"]):
+        keepa_key = st.text_input("Keepa API key", value=cfg["keepa_key"], type="password", key="keepa_key")
+        github_token = st.text_input("GitHub token (matrix storage)", value=cfg["github_token"],
+                                     type="password", key="github_token")
         cache_hours = st.number_input("Cache lookups for (hours)", value=int(cfg["cache_hours"]),
                                       min_value=0, max_value=168, step=1, key="cache_hours")
 
@@ -140,65 +144,88 @@ def fmt_roi(val):
     icon = "🟢" if val >= 20 else ("🟡" if val >= 10 else ("🟠" if val > 0 else "🔴"))
     return f"{icon} {val:.1f}%"
 
-# ─── BRAND GATING MATRIX (Google Sheet) ───────────────────────────────────────
+# ─── BRAND GATING MATRIX (brand_matrix.csv in the GitHub repo) ────────────────
 
-BRAND_MATRIX_URL = ("https://docs.google.com/spreadsheets/d/"
-                    "1aJbNQ71fUffSAR54kf6eokShWdkY2FrSk2x7DCdwtHE/export?format=xlsx&gid=576947683")
-MATRIX_HEADERS = {"UK": "AMZ UK", "CA": "AMZ CA"}
-
-FILL_ORANGE = "FFFCE5CD"   # gated — can apply
-FILL_PINK   = "FFF4CCCC"   # hard gated
-FILL_YELLOW = "FFFFFF00"   # needs approval / see note
+GH_REPO = "victoriaUB/ub-mto-analyzer"
+MATRIX_FILE = "brand_matrix.csv"
+MATRIX_LOCAL = os.path.join(os.path.dirname(__file__), MATRIX_FILE)
+MATRIX_MARKETS = ["US", "CA", "UK", "AU", "JP"]
+STATUS_OPTIONS = ["", "ok", "has path to apply", "Hard Gated"]
 
 GATE_OK, GATE_APPLY, GATE_CHECK, GATE_HARD = 0, 1, 2, 3
 GATE_LABELS = {GATE_OK: "✅ OK", GATE_APPLY: "🟠 Gated — can apply",
                GATE_CHECK: "❓ To be checked", GATE_HARD: "🚫 Hard gated"}
 GATE_UNKNOWN = "❓ Gating status to be checked"
 
-def classify_gating(text, fill):
-    """Pink/green in the sheet come from conditional formatting on the text
-    ('Hard Gated' / 'ok'); orange 'can apply' cells carry a static fill."""
-    t = str(text).strip() if text is not None else ""
-    tl = t.lower()
-    note = "" if tl in ("", "ok", "hard gated") else t[:60]
-    if "hard gated" in tl or fill == FILL_PINK:
-        return GATE_HARD, note
-    if tl in ("ok", "ungated"):
-        return GATE_OK, note
-    if fill == FILL_ORANGE or fill == FILL_YELLOW or "apply" in tl:
-        return GATE_APPLY, note
-    if "ungated" in tl:
-        return GATE_OK, note
-    return GATE_CHECK, note
+def classify_gating(text):
+    tl = str(text).strip().lower() if text is not None else ""
+    if "hard" in tl:
+        return GATE_HARD
+    if tl in ("ok", "ungated") or tl.startswith("ungated"):
+        return GATE_OK
+    if "apply" in tl or "gated" in tl:
+        return GATE_APPLY
+    return GATE_CHECK
 
 def norm_brand(s):
     return "".join(ch for ch in unicodedata.normalize("NFKD", str(s)).casefold()
                    if ch.isalnum())
 
-@st.cache_data(ttl=900, show_spinner=False)
-def load_brand_matrix():
-    """{normalized brand: {'display': str, 'UK': (rank, note), 'CA': (rank, note)}}"""
-    r = requests.get(BRAND_MATRIX_URL, timeout=30)
-    r.raise_for_status()
-    ws = openpyxl.load_workbook(io.BytesIO(r.content)).worksheets[0]
-    cols = {}
-    for cell in ws[1]:
-        header = str(cell.value).strip().upper() if cell.value else ""
-        for market, name in MATRIX_HEADERS.items():
-            if header == name:
-                cols[market] = cell.column - 1
+def get_github_token():
+    try:
+        if "github_token" in st.secrets and st.secrets["github_token"]:
+            return st.secrets["github_token"]
+    except Exception:
+        pass
+    return st.session_state.get("github_token", "")
+
+def gh_headers(token):
+    return {"Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json"}
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_matrix_df():
+    """Returns (DataFrame, github_sha). Reads from GitHub when a token is set
+    (always fresh, works on Streamlit Cloud), else from the local repo file."""
+    token = get_github_token()
+    if token:
+        r = requests.get(f"https://api.github.com/repos/{GH_REPO}/contents/{MATRIX_FILE}",
+                         headers=gh_headers(token), timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        text = base64.b64decode(data["content"]).decode("utf-8")
+        df = pd.read_csv(io.StringIO(text), dtype=str).fillna("")
+        return df, data["sha"]
+    df = pd.read_csv(MATRIX_LOCAL, dtype=str).fillna("")
+    return df, None
+
+def save_matrix_df(df, sha):
+    """Commits the matrix back to GitHub (needs token); local file as fallback."""
+    csv_text = df.to_csv(index=False)
+    token = get_github_token()
+    if token:
+        body = {"message": "Update brand matrix from MTO Analyzer",
+                "content": base64.b64encode(csv_text.encode("utf-8")).decode("ascii")}
+        if sha:
+            body["sha"] = sha
+        r = requests.put(f"https://api.github.com/repos/{GH_REPO}/contents/{MATRIX_FILE}",
+                         headers=gh_headers(token), json=body, timeout=30)
+        r.raise_for_status()
+        return "github"
+    with open(MATRIX_LOCAL, "w") as f:
+        f.write(csv_text)
+    return "local"
+
+def matrix_from_df(df):
+    """{normalized brand: {'display', 'note', market: rank}}"""
     matrix = {}
-    for row in ws.iter_rows(min_row=2):
-        brand = row[0].value
-        if brand is None or not str(brand).strip():
+    for _, r in df.iterrows():
+        brand = str(r.get("Brand", "")).strip()
+        if not brand:
             continue
-        entry = {"display": str(brand).strip()}
-        for market, idx in cols.items():
-            cell = row[idx] if idx < len(row) else None
-            fill = None
-            if cell is not None and cell.fill and cell.fill.fill_type == "solid":
-                fill = str(cell.fill.start_color.rgb or "")
-            entry[market] = classify_gating(cell.value if cell is not None else None, fill)
+        entry = {"display": brand, "note": str(r.get("Notes", "")).strip()}
+        for market in MATRIX_MARKETS:
+            entry[market] = classify_gating(r.get(market, ""))
         matrix[norm_brand(brand)] = entry
     return matrix
 
@@ -366,6 +393,54 @@ def read_input(uploaded):
         return pd.read_csv(uploaded)
     return pd.read_excel(uploaded, engine="openpyxl")
 
+# ─── PAGE: BRAND MATRIX EDITOR ────────────────────────────────────────────────
+
+if page == "🏷️ Brand Matrix":
+    st.subheader("Brand gating matrix")
+    st.caption("ok = we can sell · has path to apply = gated but can apply · Hard Gated = can't sell · "
+               "empty = to be checked. Add new brands in the last row.")
+    try:
+        matrix_df, matrix_sha = load_matrix_df()
+    except Exception as e:
+        st.error(f"Could not load brand matrix: {e}")
+        st.stop()
+
+    edited_df = st.data_editor(
+        matrix_df,
+        num_rows="dynamic",
+        use_container_width=True,
+        height=600,
+        column_config={
+            "Brand": st.column_config.TextColumn("Brand", required=True),
+            **{m: st.column_config.SelectboxColumn(m, options=STATUS_OPTIONS, required=False)
+               for m in MATRIX_MARKETS},
+            "Notes": st.column_config.TextColumn("Notes", width="large"),
+        },
+    )
+
+    if st.button("💾 Save matrix", type="primary"):
+        clean = edited_df.fillna("")
+        clean = clean[clean["Brand"].astype(str).str.strip() != ""]
+        dupes = clean["Brand"].astype(str).str.strip().str.casefold().duplicated()
+        if dupes.any():
+            st.error(f"Duplicate brand name(s): {', '.join(clean.loc[dupes, 'Brand'].unique())} — merge them first.")
+        else:
+            try:
+                target = save_matrix_df(clean, matrix_sha)
+            except requests.HTTPError as e:
+                if e.response is not None and e.response.status_code == 409:
+                    st.error("Someone else saved the matrix while you were editing — reload the page and redo your change.")
+                else:
+                    st.error(f"Save failed: {e}")
+            else:
+                load_matrix_df.clear()
+                if target == "github":
+                    st.success(f"Saved to GitHub — {len(clean)} brands. All app users see this within a minute.")
+                else:
+                    st.warning("No GitHub token set — saved to the local file only. "
+                               "On Streamlit Cloud this is lost on restart; add github_token to secrets.")
+    st.stop()
+
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 uploaded = st.file_uploader("Upload file with EAN, Title, Purchase price EUR", type=["xlsx", "csv"])
@@ -460,13 +535,13 @@ if tokens_left is not None:
     st.caption(f"Keepa tokens left: {tokens_left}")
 
 try:
-    brand_matrix = load_brand_matrix()
+    brand_matrix = matrix_from_df(load_matrix_df()[0])
     matrix_error = None
 except Exception as e:
     brand_matrix = {}
     matrix_error = str(e)
 if matrix_error:
-    st.warning(f"Could not load Brand Matrix from Google Sheets — gating shown as 'to be checked'. ({matrix_error})")
+    st.warning(f"Could not load Brand Matrix — gating shown as 'to be checked'. ({matrix_error})")
 
 rows = []
 for it in items:
@@ -491,12 +566,13 @@ for it in items:
             row[f"Gating {market}"] = GATE_UNKNOWN
             gate_ranks[market] = GATE_CHECK
         else:
-            rank_g, note_g = gating[market]
-            label = GATE_LABELS[rank_g]
-            if note_g:
-                label += f" ({note_g})"
-            row[f"Gating {market}"] = label
+            rank_g = gating[market]
+            row[f"Gating {market}"] = GATE_LABELS[rank_g]
             gate_ranks[market] = rank_g
+    if gating is not None and gating.get("note"):
+        notes_matrix = f"Matrix: {gating['note']}"
+    else:
+        notes_matrix = None
     row["_gate"] = min(gate_ranks.values())
     row["_gate_uk"] = gate_ranks["UK"]
     row["_gate_ca"] = gate_ranks["CA"]
@@ -523,6 +599,8 @@ for it in items:
         row[f"Sell {market} ({cur})"] = round(sell, 2) if sell is not None else None
         row[f"Rank {market}"] = rank
         row[f"ROI {market}"] = roi
+    if notes_matrix:
+        notes.append(notes_matrix)
     row["Notes"] = "; ".join(notes)
     rows.append(row)
 
