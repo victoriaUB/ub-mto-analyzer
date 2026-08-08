@@ -334,16 +334,18 @@ def normalize_ean(val):
     return s
 
 def detect_columns(df):
-    ean_col = title_col = price_col = None
+    ean_col = title_col = price_col = brand_col = None
     for c in df.columns:
         lc = str(c).lower()
         if ean_col is None and ("ean" in lc or "barcode" in lc or "gtin" in lc):
             ean_col = c
+        elif brand_col is None and "brand" in lc:
+            brand_col = c
         elif title_col is None and any(w in lc for w in ("title", "desc", "product", "name")):
             title_col = c
         elif price_col is None and any(w in lc for w in ("price", "purchase", "eur", "cost")):
             price_col = c
-    return ean_col, title_col, price_col
+    return ean_col, title_col, price_col, brand_col
 
 def read_input(uploaded):
     if uploaded.name.lower().endswith(".csv"):
@@ -394,53 +396,93 @@ if page == "🏷️ Brand Matrix":
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 
-uploaded = st.file_uploader("Upload file with EAN, Title, Purchase price EUR", type=["xlsx", "csv"])
-
-if not uploaded:
-    st.info("Upload an .xlsx or .csv with three columns: EAN, Title, Purchase price (EUR). "
-            "Column names are detected automatically.")
-    st.stop()
-
-try:
-    raw = read_input(uploaded)
-except Exception as e:
-    st.error(f"Could not read file: {e}")
-    st.stop()
-
-raw.columns = [str(c).strip() for c in raw.columns]
-ean_col, title_col, price_col = detect_columns(raw)
-
-if ean_col is None or price_col is None:
-    st.error(f"Could not detect required columns. Found: EAN → {ean_col}, "
-             f"Title → {title_col}, Price → {price_col}. "
-             "Rename your columns to include 'EAN' and 'Price'.")
-    st.stop()
-
-st.caption(f"Detected columns — EAN: **{ean_col}**, Title: **{title_col or '(none)'}**, "
-           f"Purchase price EUR: **{price_col}**")
+input_mode = st.radio("Input", ["📄 Upload file", "⌨️ Enter manually"],
+                      horizontal=True, label_visibility="collapsed")
 
 items = []
 skipped = 0
 seen = set()
-for _, r in raw.iterrows():
-    ean = normalize_ean(r[ean_col])
-    price = pd.to_numeric(r[price_col], errors="coerce")
-    if ean is None or pd.isna(price):
-        skipped += 1
-        continue
-    if ean in seen:
-        continue
-    seen.add(ean)
-    items.append({
-        "ean": ean,
-        "title": str(r[title_col]) if title_col and pd.notna(r[title_col]) else "",
-        "price_eur": float(price),
-    })
+
+if input_mode == "📄 Upload file":
+    uploaded = st.file_uploader("Upload file with EAN, Title, Purchase price EUR", type=["xlsx", "csv"])
+
+    if not uploaded:
+        st.info("Upload an .xlsx or .csv with columns: EAN, Title, Purchase price (EUR) — "
+                "and optionally Brand. Column names are detected automatically.")
+        st.stop()
+
+    try:
+        raw = read_input(uploaded)
+    except Exception as e:
+        st.error(f"Could not read file: {e}")
+        st.stop()
+
+    raw.columns = [str(c).strip() for c in raw.columns]
+    ean_col, title_col, price_col, brand_col = detect_columns(raw)
+
+    if ean_col is None or price_col is None:
+        st.error(f"Could not detect required columns. Found: EAN → {ean_col}, "
+                 f"Title → {title_col}, Price → {price_col}. "
+                 "Rename your columns to include 'EAN' and 'Price'.")
+        st.stop()
+
+    st.caption(f"Detected columns — EAN: **{ean_col}**, Title: **{title_col or '(none)'}**, "
+               f"Purchase price EUR: **{price_col}**, Brand: **{brand_col or '(none — will use Keepa)'}**")
+
+    for _, r in raw.iterrows():
+        ean = normalize_ean(r[ean_col])
+        price = pd.to_numeric(r[price_col], errors="coerce")
+        if ean is None or pd.isna(price):
+            skipped += 1
+            continue
+        if ean in seen:
+            continue
+        seen.add(ean)
+        items.append({
+            "ean": ean,
+            "title": str(r[title_col]) if title_col and pd.notna(r[title_col]) else "",
+            "price_eur": float(price),
+            "brand": str(r[brand_col]).strip() if brand_col and pd.notna(r[brand_col]) else "",
+        })
+    source_id = uploaded.name
+else:
+    st.caption("Add products below (EAN and Purchase price required). "
+               "Brand is used for the gating check — if left empty, Keepa's brand is used.")
+    manual_df = st.data_editor(
+        pd.DataFrame([{"Brand": "", "EAN": "", "Purchase price EUR": None}]),
+        num_rows="dynamic",
+        use_container_width=True,
+        key="manual_input",
+        column_config={
+            "Brand": st.column_config.TextColumn("Brand"),
+            "EAN": st.column_config.TextColumn("EAN", required=True),
+            "Purchase price EUR": st.column_config.NumberColumn("Purchase price EUR",
+                                                                min_value=0.0, format="%.2f"),
+        },
+    )
+    for _, r in manual_df.iterrows():
+        brand = str(r.get("Brand") or "").strip()
+        ean_raw = str(r.get("EAN") or "").strip()
+        price = pd.to_numeric(r.get("Purchase price EUR"), errors="coerce")
+        if not brand and not ean_raw and pd.isna(price):
+            continue                     # untouched empty row
+        ean = normalize_ean(ean_raw)
+        if ean is None or pd.isna(price):
+            skipped += 1
+            continue
+        if ean in seen:
+            continue
+        seen.add(ean)
+        items.append({"ean": ean, "title": "", "price_eur": float(price), "brand": brand})
+    source_id = "manual entry"
 
 if skipped:
     st.warning(f"{skipped} row(s) skipped — missing/invalid EAN or price.")
 if not items:
-    st.error("No valid rows found.")
+    if input_mode == "⌨️ Enter manually":
+        st.info("Fill in at least one row with EAN and purchase price.")
+    else:
+        st.error("No valid rows found.")
     st.stop()
 
 st.markdown(f"**{len(items)} unique products** ready. "
@@ -473,14 +515,14 @@ if st.button("🔍 Fetch from Keepa & Analyze", type="primary"):
 
     st.session_state["market_data"] = market_data
     st.session_state["tokens_left"] = tokens_left
-    st.session_state["result_file"] = uploaded.name
+    st.session_state["result_file"] = source_id
 
 if "market_data" not in st.session_state:
     st.stop()
 
 market_data = st.session_state["market_data"]
 tokens_left = st.session_state["tokens_left"]
-if st.session_state.get("result_file") != uploaded.name:
+if st.session_state.get("result_file") != source_id:
     st.warning("Results below are from a previously fetched file — click the button above to re-fetch.")
 if tokens_left is not None:
     st.caption(f"Keepa tokens left: {tokens_left}")
@@ -503,12 +545,13 @@ for it in items:
     }
     notes = []
 
-    brand = None
-    for market in KEEPA_DOMAINS:
-        d = market_data.get(market, {}).get(it["ean"])
-        if d and d.get("brand"):
-            brand = d["brand"]
-            break
+    brand = it.get("brand") or None
+    if not brand:
+        for market in KEEPA_DOMAINS:
+            d = market_data.get(market, {}).get(it["ean"])
+            if d and d.get("brand"):
+                brand = d["brand"]
+                break
     row["Brand"] = brand
     gating = gating_for_brand(brand_matrix, brand)
     gate_ranks = {}
