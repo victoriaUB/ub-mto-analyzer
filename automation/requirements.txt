@@ -1,0 +1,5 @@
+# Pinned dependencies for the GitHub Actions pipeline (Python 3.11)
+pandas==2.2.3
+requests==2.32.3
+openpyxl==3.1.5
+xlrd==2.0.1

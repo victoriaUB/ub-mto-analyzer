@@ -1,0 +1,45 @@
+name: MTO Analyzer Pipeline
+
+on:
+  schedule:
+    # Every 30 min, 08:00–19:30 Madrid, weekdays
+    - cron: "*/30 6-17 * * 1-5"
+  workflow_dispatch:
+
+concurrency:
+  group: mto-analyzer
+  cancel-in-progress: false
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      - run: pip install -r automation/requirements.txt pytest
+      - run: python -m pytest tests/ -q
+
+  run-pipeline:
+    needs: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      - run: pip install -r automation/requirements.txt
+      - name: Run MTO pipeline
+        env:
+          GMAIL_CLIENT_ID: ${{ secrets.GMAIL_CLIENT_ID }}
+          GMAIL_APP_SECRET: ${{ secrets.GMAIL_APP_SECRET }}
+          GMAIL_REFRESH_TOKEN: ${{ secrets.GMAIL_REFRESH_TOKEN }}
+          KEEPA_API_KEY: ${{ secrets.KEEPA_API_KEY }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+        run: python automation/mto_pipeline.py
