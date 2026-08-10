@@ -2,8 +2,8 @@ name: MTO Analyzer Pipeline
 
 on:
   schedule:
-    # Every 30 min, 08:00–19:30 Madrid, weekdays
-    - cron: "*/30 6-17 * * 1-5"
+    # Once a day, ~09:30 Madrid, weekdays (plus on-demand via workflow_dispatch)
+    - cron: "30 7 * * 1-5"
   workflow_dispatch:
 
 concurrency:
@@ -27,14 +27,23 @@ jobs:
     needs: tests
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      GMAIL_CONFIGURED: ${{ secrets.GMAIL_REFRESH_TOKEN != '' }}
     steps:
+      - name: Skip — secrets not configured yet
+        if: env.GMAIL_CONFIGURED != 'true'
+        run: echo "GMAIL_* secrets are not set — skipping the pipeline (this is not an error)."
       - uses: actions/checkout@v4
+        if: env.GMAIL_CONFIGURED == 'true'
       - uses: actions/setup-python@v5
+        if: env.GMAIL_CONFIGURED == 'true'
         with:
           python-version: "3.11"
           cache: "pip"
-      - run: pip install -r automation/requirements.txt
+      - if: env.GMAIL_CONFIGURED == 'true'
+        run: pip install -r automation/requirements.txt
       - name: Run MTO pipeline
+        if: env.GMAIL_CONFIGURED == 'true'
         env:
           GMAIL_CLIENT_ID: ${{ secrets.GMAIL_CLIENT_ID }}
           GMAIL_APP_SECRET: ${{ secrets.GMAIL_APP_SECRET }}
