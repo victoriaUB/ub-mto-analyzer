@@ -357,7 +357,7 @@ def build_fetch_plan(items, matrix, skip_hard_gated=True):
     return plan, skipped
 
 
-RESULT_COLUMNS = ["Product", "Brand", "EAN", "Purchase (EUR)",
+RESULT_COLUMNS = ["Product", "Brand", "EAN", "Purchase (EUR)", "Status",
                   "ASIN CA", "Sell CA (CAD)", "Rank CA", "ROI CA", "Gating CA",
                   "ASIN UK", "Sell UK (GBP)", "Rank UK", "ROI UK", "Gating UK", "Notes"]
 
@@ -423,6 +423,7 @@ def build_result_df(items, market_data, matrix, params, skipped_pairs=None):
         if gating is not None and gating.get("note"):
             notes.append(f"Matrix: {gating['note']}")
         row["Notes"] = "; ".join(notes)
+        row["Status"] = product_status(row)
         rows.append(row)
 
     result_df = pd.DataFrame(rows)
@@ -450,40 +451,64 @@ STATUS_UNGATING = "🟠 Opportunities found — ungating required"
 STATUS_NEW_LAUNCH = "🆕 New launch — no listings on target markets; check if worth creating"
 STATUS_NO_OPP = "⚪ No opportunities — ROI below threshold on existing listings"
 
+# Per-product labels for the Status column (same categories, table-sized)
+PSTATUS_EXISTING = "🟢 opportunity"
+PSTATUS_UNGATING = "🟠 needs ungating"
+PSTATUS_NEW = "🆕 new launch"
+PSTATUS_LOW = "⚪ below threshold"
 
-def offer_status(result_df, roi_threshold=ROI_THRESHOLD):
-    """Headline status for a processed MTO offer.
 
-    Priority: sellable high-ROI products on existing listings > high-ROI behind
-    a gating application > nothing listed at all (new launch) > listed but low ROI.
-    Returns (status_label, counts dict).
-    """
+def product_status(row, roi_threshold=ROI_THRESHOLD):
+    """Classify one result row: opportunity on an ungated existing listing >
+    opportunity behind a gating application > no listing anywhere (new launch)
+    > listed but below the ROI threshold."""
     ok_label = GATE_LABELS[GATE_OK]
     apply_label = GATE_LABELS[GATE_APPLY]
-    n_existing = n_ungating = 0
     any_listing = False
-    for _, r in result_df.iterrows():
-        for m in ("UK", "CA"):
-            asin = r.get(f"ASIN {m}")
-            if asin is not None and pd.notna(asin):
-                any_listing = True
-            roi = r.get(f"ROI {m}")
-            if roi is None or pd.isna(roi) or roi < roi_threshold:
-                continue
-            gate = r.get(f"Gating {m}")
-            if gate == ok_label:
-                n_existing += 1
-            elif gate == apply_label:
-                n_ungating += 1
-    counts = {"existing": n_existing, "ungating": n_ungating,
-              "any_listing": any_listing}
-    if n_existing:
-        return STATUS_EXISTING, counts
-    if n_ungating:
-        return STATUS_UNGATING, counts
-    if not any_listing:
-        return STATUS_NEW_LAUNCH, counts
-    return STATUS_NO_OPP, counts
+    best = PSTATUS_LOW
+    for m in ("UK", "CA"):
+        asin = row.get(f"ASIN {m}")
+        if asin is not None and pd.notna(asin):
+            any_listing = True
+        roi = row.get(f"ROI {m}")
+        if roi is None or pd.isna(roi) or roi < roi_threshold:
+            continue
+        gate = row.get(f"Gating {m}")
+        if gate == ok_label:
+            return PSTATUS_EXISTING
+        if gate == apply_label:
+            best = PSTATUS_UNGATING
+    if best == PSTATUS_UNGATING:
+        return best
+    return PSTATUS_LOW if any_listing else PSTATUS_NEW
+
+
+def offer_status(result_df, roi_threshold=ROI_THRESHOLD):
+    """Headline for a whole offer: the highest-priority per-product status
+    present, plus a breakdown so mixed 200-EAN offers stay readable.
+    Returns (headline_string, counts dict)."""
+    if "Status" in result_df.columns:
+        statuses = list(result_df["Status"])
+    else:
+        statuses = [product_status(r, roi_threshold) for _, r in result_df.iterrows()]
+    counts = {"existing": statuses.count(PSTATUS_EXISTING),
+              "ungating": statuses.count(PSTATUS_UNGATING),
+              "new": statuses.count(PSTATUS_NEW),
+              "low": statuses.count(PSTATUS_LOW)}
+    if counts["existing"]:
+        headline = STATUS_EXISTING
+    elif counts["ungating"]:
+        headline = STATUS_UNGATING
+    elif counts["new"] and not counts["low"]:
+        headline = STATUS_NEW_LAUNCH
+    else:
+        headline = STATUS_NO_OPP
+    breakdown = " · ".join(f"{n} {label}" for label, n in [
+        (PSTATUS_EXISTING, counts["existing"]), (PSTATUS_UNGATING, counts["ungating"]),
+        (PSTATUS_NEW, counts["new"]), (PSTATUS_LOW, counts["low"])] if n)
+    if len(result_df) > 1 and breakdown:
+        headline = f"{headline}  ({breakdown})"
+    return headline, counts
 
 
 def analyze(items, keepa_key, params=None, matrix_df=None, cache_path=None,

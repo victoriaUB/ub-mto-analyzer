@@ -61,7 +61,7 @@ CSV as `*_analysis.xlsx` — read it for the canvas.
 
 ### 4. Create Slack canvas
 Title: `[BRAND] — MTO Analysis [D Mon YYYY]`. Content: offer terms, then the
-full analysis table (Product, Brand, EAN, Purchase €, Sell CA, ROI CA,
+full analysis table (Product, Brand, EAN, Purchase €, Status, Sell CA, ROI CA,
 Gating CA, Sell UK, ROI UK, Gating UK, Notes) in result order (sellable
 first, ROI CA → UK). **Max 150 table rows per canvas API call** — chunk with
 `slack_update_canvas` (append) beyond that.
@@ -79,8 +79,10 @@ The four statuses:
 
 ### 6. Post to Slack
 `slack_send_message` to `C01V52LDVFW` (mentions as literal `<@U…>`, never
-HTML-escaped). Greeting depends on status: on **New launch**, Anastasia
-comes first; otherwise only Rita + Sonya.
+HTML-escaped). Greeting depends on status: if the offer contains ANY 🆕 new-launch
+products, Anastasia comes first; otherwise only Rita + Sonya. For mixed
+offers the Status line already carries the per-category breakdown — quote it
+as-is.
 
 ```
 Hi [<@U0795R217CJ> ]<@U0550FKCXEX>, <@U05C2GHL7G8>! Please check analyzed MTO from Perfumes Club for [BRAND] ([short context, e.g. "L'Interdit Elixir — NEW 2026 launch"])
