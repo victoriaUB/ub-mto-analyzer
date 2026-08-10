@@ -188,6 +188,47 @@ def test_build_result_df_keepa_brand_fallback():
     assert df.iloc[0]["Brand"] == "GIVENCHY"
 
 
+# ─── Offer status ─────────────────────────────────────────────────────────────
+
+def _status_df(rows):
+    return pd.DataFrame(rows)
+
+
+def test_status_existing_listings():
+    df = _status_df([{"ASIN UK": "B1", "ROI UK": 25.0, "Gating UK": core.GATE_LABELS[core.GATE_OK],
+                      "ASIN CA": None, "ROI CA": None, "Gating CA": core.GATE_LABELS[core.GATE_HARD]}])
+    status, counts = core.offer_status(df)
+    assert status == core.STATUS_EXISTING and counts["existing"] == 1
+
+
+def test_status_ungating_required():
+    df = _status_df([{"ASIN UK": "B1", "ROI UK": 25.0, "Gating UK": core.GATE_LABELS[core.GATE_APPLY],
+                      "ASIN CA": "B2", "ROI CA": 5.0, "Gating CA": core.GATE_LABELS[core.GATE_OK]}])
+    status, _ = core.offer_status(df)
+    assert status == core.STATUS_UNGATING
+
+
+def test_status_new_launch():
+    df = _status_df([{"ASIN UK": None, "ROI UK": None, "Gating UK": core.GATE_LABELS[core.GATE_OK],
+                      "ASIN CA": None, "ROI CA": None, "Gating CA": core.GATE_LABELS[core.GATE_OK]}])
+    status, _ = core.offer_status(df)
+    assert status == core.STATUS_NEW_LAUNCH
+
+
+def test_status_no_opportunities():
+    df = _status_df([{"ASIN UK": "B1", "ROI UK": 3.0, "Gating UK": core.GATE_LABELS[core.GATE_OK],
+                      "ASIN CA": "B2", "ROI CA": -5.0, "Gating CA": core.GATE_LABELS[core.GATE_OK]}])
+    status, _ = core.offer_status(df)
+    assert status == core.STATUS_NO_OPP
+
+
+def test_status_threshold_boundary():
+    df = _status_df([{"ASIN UK": "B1", "ROI UK": 17.0, "Gating UK": core.GATE_LABELS[core.GATE_OK],
+                      "ASIN CA": None, "ROI CA": None, "Gating CA": core.GATE_LABELS[core.GATE_OK]}])
+    assert core.offer_status(df)[0] == core.STATUS_EXISTING          # 17.0 counts
+    assert core.offer_status(df, roi_threshold=17.1)[0] == core.STATUS_NO_OPP
+
+
 # ─── Cache pruning ────────────────────────────────────────────────────────────
 
 def test_cache_prune(tmp_path=None):

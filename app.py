@@ -301,6 +301,9 @@ result_df = core.build_result_df(items, st.session_state["market_data"],
                                  core.matrix_from_df(matrix_df), P,
                                  st.session_state.get("skipped_pairs"))
 
+status, _ = core.offer_status(result_df)
+st.markdown(f"### {status}")
+
 n_found = result_df[["ROI UK", "ROI CA"]].notna().any(axis=1).sum()
 st.markdown(f"**{len(result_df)} products** ({n_found} found on Keepa) — "
             f"sellable brands first, then by ROI CA, then ROI UK · rates: {P['_rates_source']}")

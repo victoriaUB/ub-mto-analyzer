@@ -147,8 +147,10 @@ def format_summary(subject, res):
     n = len(df)
     n_found = int(df[["ROI UK", "ROI CA"]].notna().any(axis=1).sum())
     n_hard = int((df[["Gating UK", "Gating CA"]] == core.GATE_LABELS[core.GATE_HARD]).all(axis=1).sum())
+    status, _ = core.offer_status(df)
 
     lines = [f"📦 *MTO offer analyzed* — {subject}",
+             f"*Status: {status}*",
              f"{n} products · {n_found} found on Keepa · rates: {res['rates_note']}"]
     if res.get("skipped_rows"):
         lines.append(f"⚠️ {res['skipped_rows']} row(s) skipped (missing/invalid EAN or price)")

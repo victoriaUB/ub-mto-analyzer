@@ -443,6 +443,49 @@ def build_result_df(items, market_data, matrix, params, skipped_pairs=None):
     return result_df[[c for c in RESULT_COLUMNS if c in result_df.columns]]
 
 
+ROI_THRESHOLD = 17.0   # % — an "opportunity" needs at least this ROI
+
+STATUS_EXISTING = "🟢 Opportunities with existing listings found"
+STATUS_UNGATING = "🟠 Opportunities found — ungating required"
+STATUS_NEW_LAUNCH = "🆕 New launch — no listings on target markets; check if worth creating"
+STATUS_NO_OPP = "⚪ No opportunities — ROI below threshold on existing listings"
+
+
+def offer_status(result_df, roi_threshold=ROI_THRESHOLD):
+    """Headline status for a processed MTO offer.
+
+    Priority: sellable high-ROI products on existing listings > high-ROI behind
+    a gating application > nothing listed at all (new launch) > listed but low ROI.
+    Returns (status_label, counts dict).
+    """
+    ok_label = GATE_LABELS[GATE_OK]
+    apply_label = GATE_LABELS[GATE_APPLY]
+    n_existing = n_ungating = 0
+    any_listing = False
+    for _, r in result_df.iterrows():
+        for m in ("UK", "CA"):
+            asin = r.get(f"ASIN {m}")
+            if asin is not None and pd.notna(asin):
+                any_listing = True
+            roi = r.get(f"ROI {m}")
+            if roi is None or pd.isna(roi) or roi < roi_threshold:
+                continue
+            gate = r.get(f"Gating {m}")
+            if gate == ok_label:
+                n_existing += 1
+            elif gate == apply_label:
+                n_ungating += 1
+    counts = {"existing": n_existing, "ungating": n_ungating,
+              "any_listing": any_listing}
+    if n_existing:
+        return STATUS_EXISTING, counts
+    if n_ungating:
+        return STATUS_UNGATING, counts
+    if not any_listing:
+        return STATUS_NEW_LAUNCH, counts
+    return STATUS_NO_OPP, counts
+
+
 def analyze(items, keepa_key, params=None, matrix_df=None, cache_path=None,
             cache_hours=24, progress=None, skip_hard_gated=True):
     """End-to-end: gating pre-check → Keepa fetch → ranked result table.

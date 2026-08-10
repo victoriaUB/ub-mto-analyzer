@@ -19,8 +19,8 @@ does, plus the analysis.
 | Slack channel | C01V52LDVFW (#fb_purchase_es) |
 | Processed log | ~/.claude/mto-offers-processed.txt |
 | Analyzer repo | ~/Documents/ub-mto-analyzer |
-| Tag | `<@U0550FKCXEX>` Rita, `<@U05C2GHL7G8>` Sonya |
-| FYI | `<@U06P06C6WKX>` Florencia, `<@U0795R217CJ>` Anastasia |
+| Tag always | `<@U0550FKCXEX>` Rita, `<@U05C2GHL7G8>` Sonya |
+| Tag on "New launch" status | `<@U0795R217CJ>` Anastasia Kozyreva (listings creation), FIRST in the greeting |
 
 Prerequisite: Andreina's emails must be visible to the connected Gmail account
 (victoria@tweetybeauty.com) — i.e. the forward from the matteo.po.fb mailbox
@@ -66,26 +66,35 @@ Gating CA, Sell UK, ROI UK, Gating UK, Notes) in result order (sellable
 first, ROI CA → UK). **Max 150 table rows per canvas API call** — chunk with
 `slack_update_canvas` (append) beyond that.
 
-### 5. Post to Slack
+### 5. Determine the offer STATUS
+The analyzer prints it ("Status:" line — computed by `core.offer_status`).
+The four statuses:
+
+| Status | Meaning |
+|--------|---------|
+| 🟢 Opportunities with existing listings found | ≥1 product with ROI ≥ 17% on an existing listing in a market where the brand is ✅ ungated |
+| 🟠 Opportunities found — ungating required | ≥1 product with ROI ≥ 17% but the brand is 🟠 soft-gated (path to apply) there |
+| 🆕 New launch — check if worth creating | none of the EANs have listings on the target markets |
+| ⚪ No opportunities — ROI below threshold | listings exist but nothing clears 17% |
+
+### 6. Post to Slack
 `slack_send_message` to `C01V52LDVFW` (mentions as literal `<@U…>`, never
-HTML-escaped; canvas link and FYI lines separated by a blank line):
+HTML-escaped). Greeting depends on status: on **New launch**, Anastasia
+comes first; otherwise only Rita + Sonya.
 
 ```
-Hi <@U0550FKCXEX>, <@U05C2GHL7G8>!
+Hi [<@U0795R217CJ> ]<@U0550FKCXEX>, <@U05C2GHL7G8>! Please check analyzed MTO from Perfumes Club for [BRAND] ([short context, e.g. "L'Interdit Elixir — NEW 2026 launch"])
 
-Perfumes Club sent us an MTO offer for [BRAND] — analyzed with ROI + gating.
+Status: [STATUS line]
 
-[OFFER TERMS — all caps, one per line]
+[OFFER TERMS — all caps, one per line, e.g. MOQ / DELIVERY]
 
-Top opportunities (sellable first):
-[top 3–5 lines from the analyzer summary: ROI CA | ROI UK — Brand — Product]
+Analysis summary: [1–3 sentences: gating verdict, top ROI lines if any, what action the status implies]
 
 📋 Full analysis: [canvas_url]
-
-FYI <@U06P06C6WKX> <@U0795R217CJ>
 ```
 
-### 6. Mark processed & report
+### 7. Mark processed & report
 Append all handled message IDs to the log in one write. Report one line per
 offer: brand, canvas URL, message link. If the analyzer script fails, post
 nothing for that email, leave it unlogged (retry next run), and tell Victoria
