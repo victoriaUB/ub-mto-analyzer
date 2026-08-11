@@ -458,14 +458,14 @@ ROI_THRESHOLD = 17.0   # % — an "opportunity" needs at least this ROI
 PSTATUS_EXISTING = "🟢 opportunity"
 PSTATUS_UNGATING = "🟠 soft-gated, good ROI"
 PSTATUS_CHECKGATE = "🔵 ROI ok — gating unknown"
-PSTATUS_NEW = "🆕 new launch"
+PSTATUS_NEW = "🆕 no listing"
 PSTATUS_LOW = "⚪ below threshold"
 PSTATUS_HARD = "🚫 hard gated"
 
 # Offer-level headlines (app display)
 STATUS_EXISTING = "🟢 Opportunities with existing listings found"
 STATUS_UNGATING = "🟠 Soft-gated brands with good ROI"
-STATUS_NEW_LAUNCH = "🆕 New launch — check if worth creating"
+STATUS_NEW_LAUNCH = "🆕 No listing — check if worth creating"
 STATUS_NO_OPP = "⚪ No opportunities — ROI below threshold"
 STATUS_HARD = "🚫 Hard gated on all target markets"
 STATUS_HEADLINES = {}   # filled after the per-product labels are defined
@@ -473,7 +473,7 @@ STATUS_HEADLINES = {}   # filled after the per-product labels are defined
 # Slack/report phrasing per category, "{n}" filled in
 STATUS_SENTENCES = [
     (PSTATUS_EXISTING, "{n} EANs for ungated brands with ROI above {t:.0f}%"),
-    (PSTATUS_UNGATING, "{n} EANs for soft-gated brands with ROI above {t:.0f}% — ungating to be requested"),
+    (PSTATUS_UNGATING, "{n} EANs for soft-gated brands with ROI above {t:.0f}% — ungating required"),
     (PSTATUS_CHECKGATE, "{n} EANs with ROI above {t:.0f}% for brands missing from the gating matrix, gating status to be checked"),
     (PSTATUS_NEW,      "{n} EANs with no listings on target markets, check if worth creating"),
     (PSTATUS_LOW,      "{n} EANs listed but with ROI below {t:.0f}%"),

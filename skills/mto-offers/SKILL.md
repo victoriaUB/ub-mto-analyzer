@@ -20,7 +20,7 @@ does, plus the analysis.
 | Processed log | ~/.claude/mto-offers-processed.txt |
 | Analyzer repo | ~/Documents/ub-mto-analyzer |
 | Tag always | `<@U0550FKCXEX>` Rita, `<@U05C2GHL7G8>` Sonya |
-| Tag on "New launch" status | `<@U0795R217CJ>` Anastasia Kozyreva (listings creation), FIRST in the greeting |
+| Tag on "no listing" status | `<@U0795R217CJ>` Anastasia Kozyreva (listings creation), FIRST in the greeting |
 
 Prerequisite: Andreina's emails must be visible to the connected Gmail account
 (victoria@tweetybeauty.com) — i.e. the forward from the matteo.po.fb mailbox
@@ -73,9 +73,9 @@ quote them in the post, one per line, skipping empty categories:
 | Per-product status | Meaning |
 |--------|---------|
 | 🟢 opportunity | ROI ≥ 17% in a market where the brand is ungated |
-| 🟠 soft-gated, good ROI | ROI ≥ 17% but brand is soft-gated there — ungating to be requested |
+| 🟠 soft-gated, good ROI | ROI ≥ 17% but brand is soft-gated there — ungating required |
 | 🔵 ROI ok — gating unknown | ROI ≥ 17% but the brand is missing from the gating matrix |
-| 🆕 new launch | no listings on any target market |
+| 🆕 no listing | no listings on any target market |
 | ⚪ below threshold | listed, ROI < 17% |
 | 🚫 hard gated | hard-gated on every target market |
 
@@ -85,7 +85,7 @@ text/csv → converts to a Sheet) and link it next to the canvas link.
 
 ### 6. Post to Slack
 `slack_send_message` to `C01V52LDVFW` (mentions as literal `<@U…>`, never
-HTML-escaped). Greeting depends on status: if the offer contains ANY 🆕 new-launch
+HTML-escaped). Greeting depends on status: if the offer contains ANY 🆕 no-listing
 products, Anastasia comes first; otherwise only Rita + Sonya. For mixed
 offers the Status line already carries the per-category breakdown — quote it
 as-is.
