@@ -1,4 +1,4 @@
-"""MTO Batch Analyzer — Streamlit UI.
+"""Products Analyzer — Streamlit UI (manual/file product checks).
 
 All business logic (ROI, gating, Keepa client, ranking) lives in core.py and is
 shared with the headless automation pipeline (automation/mto_pipeline.py).
@@ -15,10 +15,12 @@ import streamlit as st
 
 import core
 
-st.set_page_config(page_title="MTO Batch Analyzer", page_icon="🔍", layout="wide",
+st.set_page_config(page_title="Products Analyzer", page_icon="🔍", layout="wide",
                    initial_sidebar_state="expanded")
-st.title("MTO Batch Analyzer")
-st.caption("Upload a file with EAN / Title / Purchase price EUR — live Keepa lookup, ROI per market")
+st.title("Products Analyzer")
+st.caption("Check products by EAN — enter them manually or upload a file. "
+           "Live Keepa lookup, ROI + gating per market (CA / UK / JP). "
+           "The automated email→Slack pipeline is the *MTO Analyzer*.")
 
 # ─── CONFIG: Load / Save ──────────────────────────────────────────────────────
 
@@ -48,9 +50,22 @@ def save_config():
         json.dump(data, f, indent=2)
 
 
+RATE_KEYS = ("eur_gbp", "eur_usd", "usd_cad", "eur_jpy")
+
+
 @st.cache_data(ttl=3600)
-def cached_live_rates():
+def _fetch_rates_cached(shape):
+    """`shape` is part of the cache key: when the set of rates we need changes,
+    previously cached results (which lack the new keys) are discarded instead of
+    being served with a missing key."""
     return core.fetch_live_rates()
+
+
+def cached_live_rates():
+    live = _fetch_rates_cached(",".join(RATE_KEYS))
+    if not live or any(k not in live for k in RATE_KEYS):
+        return None          # unusable payload — fall back to manual values
+    return live
 
 
 def get_keepa_key():
@@ -94,8 +109,9 @@ with st.sidebar:
                     help="When on, every analysis uses the current ECB rate. "
                          "Turn off to use the manual values below.")
         if live:
-            st.caption(f"Live ECB ({live['date']}): JPY {live['eur_jpy']} · GBP {live['eur_gbp']} · "
-                       f"USD {live['eur_usd']} · CAD/USD {live['usd_cad']}")
+            st.caption(f"Live ECB ({live.get('date', '?')}): JPY {live.get('eur_jpy')} · "
+                       f"GBP {live.get('eur_gbp')} · USD {live.get('eur_usd')} · "
+                       f"CAD/USD {live.get('usd_cad')}")
         else:
             st.caption("⚠️ Live rates unavailable — manual values below are used.")
         st.number_input("EUR → GBP", value=cfg["eur_gbp"], step=0.001, format="%.4f", key="eur_gbp")
@@ -140,8 +156,8 @@ def effective_params():
     P = {k: st.session_state.get(k, cfg[k]) for k in core.DEFAULT_PARAMS}
     live = cached_live_rates()
     if st.session_state.get("auto_rates", True) and live:
-        P.update({k: live[k] for k in ("eur_gbp", "eur_usd", "usd_cad", "eur_jpy")})
-        P["_rates_source"] = f"live ECB {live['date']}"
+        P.update({k: live[k] for k in RATE_KEYS})
+        P["_rates_source"] = f"live ECB {live.get('date', '?')}"
     else:
         P["_rates_source"] = "manual"
     return P
@@ -339,5 +355,5 @@ st.dataframe(display_df, use_container_width=True, hide_index=True)
 buf = io.BytesIO()
 result_df.to_excel(buf, index=False, engine="openpyxl")
 st.download_button("⬇️ Download results (.xlsx)", data=buf.getvalue(),
-                   file_name="mto_analysis.xlsx",
+                   file_name="products_analysis.xlsx",
                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")

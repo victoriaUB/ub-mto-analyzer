@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""MTO automation pipeline: Gmail → ROI/gating analysis → Slack.
+"""MTO Analyzer — automated pipeline: Gmail → ROI/gating analysis → Slack.
+
+The interactive sibling (manual EAN entry / file upload) is the Products
+Analyzer, app.py — both share core.py, so the numbers are identical.
 
 What it does: polls a Gmail inbox for MTO offer emails from the supplier
 (Andreina / Engelsa), downloads the attached offer file (xlsx/xls/csv), runs
-the same ROI + brand-gating analysis as the Streamlit app (core.py), posts a
+the same ROI + brand-gating analysis as the Products Analyzer (core.py), posts a
 ranked summary + full Excel to Slack, then labels the email as processed.
 When it runs: GitHub Actions cron, every 30 min on weekdays (see
 .github/workflows/mto-analyzer.yml). Owner: Victoria.

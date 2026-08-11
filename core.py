@@ -1,9 +1,10 @@
-"""Core business logic for the MTO Analyzer.
+"""Shared business logic for both tools.
 
-Pure Python — no Streamlit imports. Used by both the Streamlit UI (app.py)
-and the headless automation pipeline (automation/mto_pipeline.py), so the
-numbers a human sees in the app and the numbers posted to Slack come from
-the exact same code and can never drift.
+Pure Python — no Streamlit imports. Used by:
+  * Products Analyzer (app.py) — interactive: manual EAN entry or file upload
+  * MTO Analyzer (automation/mto_pipeline.py) — automated: Gmail → Slack
+Both import this module, so the numbers a human sees and the numbers posted to
+Slack come from the exact same code and can never drift.
 """
 
 import io
