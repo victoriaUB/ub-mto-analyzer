@@ -115,14 +115,18 @@ def mark_processed(token, msg_id, label_id):
 
 # ─── Analysis ─────────────────────────────────────────────────────────────────
 
-def read_offer_file(filename, data):
+def parse_offer_file(filename, data, default_brand=""):
+    """(items, skipped, sheet_report). Excel workbooks are parsed sheet by
+    sheet — attachments often hold more products than the email body, split
+    across tabs."""
     if filename.lower().endswith(".csv"):
-        return pd.read_csv(io.BytesIO(data))
-    return pd.read_excel(io.BytesIO(data))     # engine auto-picked (openpyxl/xlrd)
+        items, skipped, _ = core.items_from_dataframe(
+            pd.read_csv(io.BytesIO(data)), default_brand)
+        return items, skipped, {filename: f"{len(items)} products"}
+    return core.items_from_excel(data, default_brand)
 
 
-def run_analysis(raw_df):
-    items, skipped, cols = core.items_from_dataframe(raw_df)
+def run_analysis(items, skipped=0, sheet_report=None):
     if not items:
         raise ValueError("No valid rows found (need EAN + purchase price per row).")
 
@@ -130,44 +134,46 @@ def run_analysis(raw_df):
     live = core.fetch_live_rates()
     rates_note = "manual fallback rates(!)"
     if live:
-        params.update({k: live[k] for k in ("eur_gbp", "eur_usd", "usd_cad")})
+        params.update({k: live[k] for k in ("eur_gbp", "eur_usd", "usd_cad", "eur_jpy")})
         rates_note = f"live ECB {live['date']}"
 
     matrix_df = pd.read_csv(MATRIX_PATH, dtype=str).fillna("")
     res = core.analyze(items, os.environ["KEEPA_API_KEY"], params=params,
                        matrix_df=matrix_df, skip_hard_gated=True,
+                       buybox=os.environ.get("KEEPA_BUYBOX", "1") == "1",
                        progress=lambda m: print(f"  {m}"))
     res["skipped_rows"] = skipped
+    res["sheet_report"] = sheet_report or {}
     res["rates_note"] = rates_note
     return res
 
 
 def format_summary(subject, res):
+    """The Slack body: status sentences per category, then the top rows."""
     df = res["result_df"]
-    n = len(df)
-    n_found = int(df[["ROI UK", "ROI CA"]].notna().any(axis=1).sum())
-    n_hard = int((df[["Gating UK", "Gating CA"]] == core.GATE_LABELS[core.GATE_HARD]).all(axis=1).sum())
-    status, _ = core.offer_status(df)
-
-    lines = [f"📦 *MTO offer analyzed* — {subject}",
-             f"*Status: {status}*",
-             f"{n} products · {n_found} found on Keepa · rates: {res['rates_note']}"]
+    lines = [f"*{subject}* — {len(df)} EANs analyzed"]
+    lines += core.status_summary_lines(df)
     if res.get("skipped_rows"):
-        lines.append(f"⚠️ {res['skipped_rows']} row(s) skipped (missing/invalid EAN or price)")
+        lines.append(f"({res['skipped_rows']} row(s) skipped — missing/invalid EAN or price)")
+    if res.get("sheet_report") and len(res["sheet_report"]) > 1:
+        sheets = ", ".join(f"{k}: {v}" for k, v in res["sheet_report"].items())
+        lines.append(f"(attachment tabs — {sheets})")
+
+    opportunities = df[df["Status"].isin([core.PSTATUS_EXISTING, core.PSTATUS_UNGATING,
+                                          core.PSTATUS_CHECKGATE])]
+    if len(opportunities):
+        lines.append("")
+        lines.append("*Top ROI:*")
+        for _, r in opportunities.head(SUMMARY_TOP_N).iterrows():
+            rois = " | ".join(f"{m} {core.fmt_roi(r[f'ROI {m}'])}" for m in core.MARKETS
+                              if pd.notna(r[f"ROI {m}"]))
+            lines.append(f"• {r['Brand'] or '?'} — {(r['Product'] or '')[:55]} "
+                         f"(EAN {r['EAN']}) — {rois}")
+        if len(opportunities) > SUMMARY_TOP_N:
+            lines.append(f"…and {len(opportunities) - SUMMARY_TOP_N} more in the full analysis.")
     lines.append("")
-    lines.append("*Top opportunities* (sellable first, ROI CA → UK):")
-    for i, (_, r) in enumerate(df.head(SUMMARY_TOP_N).iterrows(), 1):
-        roi_ca = core.fmt_roi(r["ROI CA"])
-        roi_uk = core.fmt_roi(r["ROI UK"])
-        product = (r["Product"] or "")[:60]
-        lines.append(f"{i}. CA {roi_ca} | UK {roi_uk} — *{r['Brand'] or '?'}* — {product} "
-                     f"(EAN {r['EAN']})")
-    if n > SUMMARY_TOP_N:
-        lines.append(f"…and {n - SUMMARY_TOP_N} more in the attached file.")
-    if n_hard:
-        lines.append(f"🚫 {n_hard} product(s) hard-gated in both markets (Keepa lookups skipped).")
-    if res.get("tokens_left") is not None:
-        lines.append(f"_Keepa tokens left: {res['tokens_left']}_")
+    lines.append(f"_rates: {res['rates_note']}"
+                 + (f" · Keepa tokens left: {res['tokens_left']}_" if res.get("tokens_left") is not None else "_"))
     return "\n".join(lines)
 
 
@@ -223,8 +229,8 @@ def process_message(token, msg_id, channel, label_id):
 
     for filename, data in attachments:
         try:
-            raw = read_offer_file(filename, data)
-            res = run_analysis(raw)
+            items, skipped, report = parse_offer_file(filename, data)
+            res = run_analysis(items, skipped, report)
         except ValueError as e:
             # Bad file content: report + mark processed (retrying won't help)
             slack_post(channel, f"⚠️ Could not analyze *{filename}* from MTO email "
@@ -249,8 +255,8 @@ def main():
 
     if args.dry_run:
         with open(args.dry_run, "rb") as f:
-            raw = read_offer_file(args.dry_run, f.read())
-        res = run_analysis(raw)
+            items, skipped, report = parse_offer_file(args.dry_run, f.read())
+        res = run_analysis(items, skipped, report)
         print("\n" + "═" * 60)
         print(format_summary(os.path.basename(args.dry_run), res))
         out = os.path.splitext(args.dry_run)[0] + "_analysis.xlsx"

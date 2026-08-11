@@ -30,7 +30,7 @@ MATRIX_FILE = os.path.join(APP_DIR, "brand_matrix.csv")
 DEFAULTS = {
     **core.DEFAULT_PARAMS,
     "keepa_key": "", "cache_hours": 24,
-    "auto_rates": True, "skip_hard_gated": True,
+    "auto_rates": True, "skip_hard_gated": True, "buybox": True,
 }
 
 
@@ -83,6 +83,10 @@ with st.sidebar:
                         min_value=0, max_value=168, step=1, key="cache_hours")
         st.checkbox("Skip Keepa lookups for hard-gated markets (saves tokens)",
                     value=bool(cfg["skip_hard_gated"]), key="skip_hard_gated")
+        st.checkbox("Request Buy Box prices (3 tokens/product instead of 1)",
+                    value=bool(cfg.get("buybox", True)), key="buybox",
+                    help="Buy Box is the accurate sell-price proxy. Off = cheaper, "
+                         "uses the lowest-NEW-offer average instead.")
 
     with st.expander("Exchange Rates", expanded=True):
         live = cached_live_rates()
@@ -90,13 +94,14 @@ with st.sidebar:
                     help="When on, every analysis uses the current ECB rate. "
                          "Turn off to use the manual values below.")
         if live:
-            st.caption(f"Live ECB ({live['date']}): GBP {live['eur_gbp']} · "
+            st.caption(f"Live ECB ({live['date']}): JPY {live['eur_jpy']} · GBP {live['eur_gbp']} · "
                        f"USD {live['eur_usd']} · CAD/USD {live['usd_cad']}")
         else:
             st.caption("⚠️ Live rates unavailable — manual values below are used.")
         st.number_input("EUR → GBP", value=cfg["eur_gbp"], step=0.001, format="%.4f", key="eur_gbp")
         st.number_input("EUR → USD", value=cfg["eur_usd"], step=0.001, format="%.4f", key="eur_usd")
         st.number_input("USD → CAD", value=cfg["usd_cad"], step=0.001, format="%.4f", key="usd_cad")
+        st.number_input("EUR → JPY", value=cfg["eur_jpy"], step=0.5, format="%.2f", key="eur_jpy")
     st.number_input("Digital Svc Fee (%)", value=cfg["dsf"], step=0.5, format="%.1f", key="dsf")
 
     st.markdown("---")
@@ -114,6 +119,15 @@ with st.sidebar:
         st.number_input("FBA fee (CAD)",         value=cfg["ca_fba"],  step=0.01, format="%.2f", key="ca_fba")
         st.number_input("Referral fee (%)",      value=cfg["ca_ref"],  step=0.5,  format="%.1f", key="ca_ref")
 
+    with st.expander("🇯🇵  JP Parameters", expanded=True):
+        st.caption("One all-in additional cost per unit (shipping, 3PL, FBA, duties), "
+                   "split by dangerous goods (EDT/EDP/perfume/aerosol) vs not.")
+        st.number_input("Additional cost DG (EUR)",  value=cfg["jp_add_dg"],  step=0.10, format="%.2f", key="jp_add_dg")
+        st.number_input("Additional cost NDG (EUR)", value=cfg["jp_add_ndg"], step=0.10, format="%.2f", key="jp_add_ndg")
+        st.number_input("Referral fee (%)",          value=cfg["jp_ref"],     step=0.1,  format="%.1f", key="jp_ref")
+        st.number_input("Digital svc fee (% of referral)", value=cfg["jp_dsf"], step=0.1, format="%.1f", key="jp_dsf")
+        st.number_input("Consumption tax (%)",       value=cfg["jp_vat"],     step=0.5,  format="%.1f", key="jp_vat")
+
     st.markdown("---")
     if st.button("💾 Save Parameters", use_container_width=True):
         save_config()
@@ -126,7 +140,7 @@ def effective_params():
     P = {k: st.session_state.get(k, cfg[k]) for k in core.DEFAULT_PARAMS}
     live = cached_live_rates()
     if st.session_state.get("auto_rates", True) and live:
-        P.update({k: live[k] for k in ("eur_gbp", "eur_usd", "usd_cad")})
+        P.update({k: live[k] for k in ("eur_gbp", "eur_usd", "usd_cad", "eur_jpy")})
         P["_rates_source"] = f"live ECB {live['date']}"
     else:
         P["_rates_source"] = "manual"
@@ -192,9 +206,12 @@ if input_mode == "📄 Upload file":
         st.stop()
 
     try:
-        raw = (pd.read_csv(uploaded) if uploaded.name.lower().endswith(".csv")
-               else pd.read_excel(uploaded, engine="openpyxl"))
-        items, skipped, cols = core.items_from_dataframe(raw)
+        if uploaded.name.lower().endswith(".csv"):
+            items, skipped, cols = core.items_from_dataframe(pd.read_csv(uploaded))
+            sheet_report = None
+        else:
+            items, skipped, sheet_report = core.items_from_excel(uploaded.read())
+            cols = None
     except ValueError as e:
         st.error(str(e))
         st.stop()
@@ -202,8 +219,11 @@ if input_mode == "📄 Upload file":
         st.error(f"Could not read file: {e}")
         st.stop()
 
-    st.caption(f"Detected columns — EAN: **{cols['ean']}**, Title: **{cols['title'] or '(none)'}**, "
-               f"Purchase price EUR: **{cols['price']}**, Brand: **{cols['brand'] or '(none — will use Keepa)'}**")
+    if cols:
+        st.caption(f"Detected columns — EAN: **{cols['ean']}**, Title: **{cols['title'] or '(none)'}**, "
+                   f"Purchase price EUR: **{cols['price']}**, Brand: **{cols['brand'] or '(none — will use Keepa)'}**")
+    if sheet_report:
+        st.caption("Sheets parsed — " + " · ".join(f"**{k}**: {v}" for k, v in sheet_report.items()))
     source_id = uploaded.name
 else:
     st.caption("Add products below (EAN and Purchase price required). "
@@ -276,6 +296,7 @@ if st.button("🔍 Fetch from Keepa & Analyze", type="primary"):
                 cache_hours=st.session_state["cache_hours"],
                 progress=lambda msg: status.update(label=msg),
                 skip_hard_gated=st.session_state.get("skip_hard_gated", True),
+                buybox=st.session_state.get("buybox", True),
             )
         except (requests.HTTPError, RuntimeError) as e:
             st.error(f"Keepa error: {e} — check your API key and token balance.")
@@ -301,16 +322,17 @@ result_df = core.build_result_df(items, st.session_state["market_data"],
                                  core.matrix_from_df(matrix_df), P,
                                  st.session_state.get("skipped_pairs"))
 
-status, _ = core.offer_status(result_df)
-st.markdown(f"### {status}")
+for _line in core.status_summary_lines(result_df):
+    st.markdown(f"#### {_line}")
 
-n_found = result_df[["ROI UK", "ROI CA"]].notna().any(axis=1).sum()
+n_found = result_df[[f"ROI {m}" for m in core.MARKETS]].notna().any(axis=1).sum()
 st.markdown(f"**{len(result_df)} products** ({n_found} found on Keepa) — "
-            f"sellable brands first, then by ROI CA, then ROI UK · rates: {P['_rates_source']}")
+            f"sellable brands first, then by ROI CA → UK → JP · rates: {P['_rates_source']}")
 
 display_df = result_df.copy()
-display_df["ROI UK"] = display_df["ROI UK"].apply(core.fmt_roi)
-display_df["ROI CA"] = display_df["ROI CA"].apply(core.fmt_roi)
+for _m in core.MARKETS:
+    display_df[f"ROI {_m}"] = display_df[f"ROI {_m}"].apply(core.fmt_roi)
+
 
 st.dataframe(display_df, use_container_width=True, hide_index=True)
 

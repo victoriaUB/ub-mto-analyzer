@@ -66,16 +66,22 @@ Gating CA, Sell UK, ROI UK, Gating UK, Notes) in result order (sellable
 first, ROI CA → UK). **Max 150 table rows per canvas API call** — chunk with
 `slack_update_canvas` (append) beyond that.
 
-### 5. Determine the offer STATUS
-The analyzer prints it ("Status:" line — computed by `core.offer_status`).
-The four statuses:
+### 5. Statuses
+The analyzer prints one count sentence per category (core.status_summary_lines) —
+quote them in the post, one per line, skipping empty categories:
 
-| Status | Meaning |
+| Per-product status | Meaning |
 |--------|---------|
-| 🟢 Opportunities with existing listings found | ≥1 product with ROI ≥ 17% on an existing listing in a market where the brand is ✅ ungated |
-| 🟠 Opportunities found — ungating required | ≥1 product with ROI ≥ 17% but the brand is 🟠 soft-gated (path to apply) there |
-| 🆕 New launch — check if worth creating | none of the EANs have listings on the target markets |
-| ⚪ No opportunities — ROI below threshold | listings exist but nothing clears 17% |
+| 🟢 opportunity | ROI ≥ 17% in a market where the brand is ungated |
+| 🟠 soft-gated, good ROI | ROI ≥ 17% but brand is soft-gated there — ungating to be requested |
+| 🔵 ROI ok — gating unknown | ROI ≥ 17% but the brand is missing from the gating matrix |
+| 🆕 new launch | no listings on any target market |
+| ⚪ below threshold | listed, ROI < 17% |
+| 🚫 hard gated | hard-gated on every target market |
+
+Markets: CA, UK, JP (Keepa domains 6/2/5). Also make the full table downloadable:
+create a Google Sheet via the Drive connector (`create_file`, contentMimeType
+text/csv → converts to a Sheet) and link it next to the canvas link.
 
 ### 6. Post to Slack
 `slack_send_message` to `C01V52LDVFW` (mentions as literal `<@U…>`, never

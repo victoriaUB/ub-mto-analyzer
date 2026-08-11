@@ -191,14 +191,24 @@ def test_build_result_df_keepa_brand_fallback():
 # ─── Offer status ─────────────────────────────────────────────────────────────
 
 def _status_df(rows):
-    return pd.DataFrame(rows)
+    """Fill in any missing market columns so rows are well-formed."""
+    ok = core.GATE_LABELS[core.GATE_OK]
+    full = []
+    for r in rows:
+        row = dict(r)
+        for m in core.MARKETS:
+            row.setdefault(f"ASIN {m}", None)
+            row.setdefault(f"ROI {m}", None)
+            row.setdefault(f"Gating {m}", ok)
+        full.append(row)
+    return pd.DataFrame(full)
 
 
 def test_status_existing_listings():
     df = _status_df([{"ASIN UK": "B1", "ROI UK": 25.0, "Gating UK": core.GATE_LABELS[core.GATE_OK],
                       "ASIN CA": None, "ROI CA": None, "Gating CA": core.GATE_LABELS[core.GATE_HARD]}])
     status, counts = core.offer_status(df)
-    assert status == core.STATUS_EXISTING and counts["existing"] == 1
+    assert status.startswith(core.STATUS_EXISTING) and counts[core.PSTATUS_EXISTING] == 1
 
 
 def test_status_ungating_required():
@@ -231,10 +241,16 @@ def test_status_mixed_offer_breakdown():
         {"ASIN UK": None, "ROI UK": None, "Gating UK": ok, "ASIN CA": None, "ROI CA": None, "Gating CA": ok},
         {"ASIN UK": "B3", "ROI UK": 2.0, "Gating UK": ok, "ASIN CA": None, "ROI CA": None, "Gating CA": ok},
     ])
-    status, counts = core.offer_status(df)
-    assert status.startswith(core.STATUS_EXISTING)
-    assert "1 🟢 opportunity" in status and "1 🟠" in status and "1 🆕" in status and "1 ⚪" in status
-    assert counts == {"existing": 1, "ungating": 1, "new": 1, "low": 1}
+    counts = core.status_counts(df)
+    assert counts[core.PSTATUS_EXISTING] == 1
+    assert counts[core.PSTATUS_UNGATING] == 1
+    assert counts[core.PSTATUS_NEW] == 1
+    assert counts[core.PSTATUS_LOW] == 1
+    lines = core.status_summary_lines(df)
+    assert len(lines) == 4
+    assert lines[0] == "1 EANs for ungated brands with ROI above 17%"
+    assert "soft-gated" in lines[1]
+    assert "no listings on target markets" in lines[2]
 
 
 def test_product_status_column_in_results():
@@ -251,6 +267,68 @@ def test_status_threshold_boundary():
                       "ASIN CA": None, "ROI CA": None, "Gating CA": core.GATE_LABELS[core.GATE_OK]}])
     assert core.offer_status(df)[0] == core.STATUS_EXISTING          # 17.0 counts
     assert core.offer_status(df, roi_threshold=17.1)[0] == core.STATUS_NO_OPP
+
+
+def test_status_hard_gated_all_markets():
+    hard = core.GATE_LABELS[core.GATE_HARD]
+    df = _status_df([{f"Gating {m}": hard for m in core.MARKETS}])
+    assert core.offer_status(df)[0].startswith("🚫")
+    assert core.status_summary_lines(df)[0].startswith("1 EANs hard-gated")
+
+
+# ─── Japan ────────────────────────────────────────────────────────────────────
+
+def test_calc_jp_matches_worked_example():
+    """Victoria's worked example: sell 145.82 EUR incl 10% tax, purchase 78.47
+    EUR ex-VAT, DG cost 35.32 -> ROI 2.83%."""
+    p = {**P, "eur_jpy": 170.0}
+    roi = core.calc_jp(78.47, 145.82 * 170.0, p, is_dg=True)
+    assert abs(roi * 100 - 2.83) < 0.05
+
+
+def test_calc_jp_ndg_cheaper_than_dg():
+    p = {**P, "eur_jpy": 170.0}
+    dg = core.calc_jp(78.47, 145.82 * 170.0, p, is_dg=True)
+    ndg = core.calc_jp(78.47, 145.82 * 170.0, p, is_dg=False)
+    assert ndg > dg
+
+
+def test_dangerous_goods_classification():
+    assert core.is_dangerous_goods("GOOD GIRL EDP 80ML") == (True, True)
+    assert core.is_dangerous_goods("L'INTERDIT ELIXIR 50ML") == (True, True)
+    assert core.is_dangerous_goods("Hydrating Face Cream 50ml") == (False, True)
+    is_dg, certain = core.is_dangerous_goods("GIFT SET 3 PCS")
+    assert is_dg and not certain          # unclear -> conservative DG
+
+
+def test_jp_market_registered():
+    assert core.MARKETS["JP"]["domain"] == 5      # Keepa domain id for amazon.co.jp
+    assert "Gating JP" in core.RESULT_COLUMNS and "ROI JP" in core.RESULT_COLUMNS
+
+
+# ─── Multi-sheet attachments ──────────────────────────────────────────────────
+
+def test_items_from_excel_all_sheets():
+    import tempfile
+    path = os.path.join(tempfile.mkdtemp(), "offer.xlsx")
+    with pd.ExcelWriter(path) as xw:
+        pd.DataFrame({"EAN": ["3348901234567"], "DESCRIPTION": ["EDP 50ML"],
+                      "PRICE": [50.0]}).to_excel(xw, sheet_name="Perfumes", index=False)
+        pd.DataFrame({"EAN": ["8411061111321"], "DESCRIPTION": ["Cream"],
+                      "PRICE": [20.0]}).to_excel(xw, sheet_name="Cosmetics", index=False)
+        pd.DataFrame({"note": ["terms and conditions"]}).to_excel(xw, sheet_name="Info", index=False)
+    items, skipped, report = core.items_from_excel(path)
+    assert len(items) == 2                       # both product tabs merged
+    assert report["Info"].startswith("no EAN")    # non-table tab reported, not fatal
+
+
+def test_reheader_finds_header_row():
+    raw = pd.DataFrame([["GIVENCHY OFFER", None, None],
+                        [None, None, None],
+                        ["EAN", "DESCRIPTION", "PRICE"],
+                        ["3348901234567", "EDP 50ML", "54,95€"]])
+    items, skipped, cols = core.items_from_dataframe(raw)
+    assert len(items) == 1 and items[0]["price_eur"] == 54.95   # comma price parsed
 
 
 # ─── Cache pruning ────────────────────────────────────────────────────────────
