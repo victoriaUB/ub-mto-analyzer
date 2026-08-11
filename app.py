@@ -29,19 +29,36 @@ CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 CACHE_FILE = os.path.join(APP_DIR, "keepa_cache.json")
 MATRIX_FILE = os.path.join(APP_DIR, "brand_matrix.csv")
 
-DEFAULTS = {
-    **core.DEFAULT_PARAMS,
+# Every key this UI reads, with literal fallbacks. Declared here (not derived
+# from core) so the page still renders if core.py is an older/newer revision
+# than app.py — a Streamlit Cloud restart can otherwise leave the two out of
+# step and crash the whole page on a missing key.
+UI_FALLBACKS = {
+    "eur_gbp": 0.867, "eur_usd": 1.170, "usd_cad": 1.369, "eur_jpy": 170.0,
+    "dsf": 3.0,
+    "uk_ship": 0.80, "uk_lab": 2.35, "uk_fba": 3.09, "uk_ref": 15.0, "uk_vat": 20.0,
+    "ca_ship": 3.12, "ca_lab": 2.35, "ca_fba": 7.33, "ca_ref": 15.0,
+    "jp_add_dg": 35.32, "jp_add_ndg": 20.21, "jp_ref": 10.4, "jp_dsf": 2.5, "jp_vat": 10.0,
     "keepa_key": "", "cache_hours": 24,
     "auto_rates": True, "skip_hard_gated": True, "buybox": True,
 }
 
+DEFAULTS = {**UI_FALLBACKS, **core.DEFAULT_PARAMS,
+            "keepa_key": "", "cache_hours": 24,
+            "auto_rates": True, "skip_hard_gated": True, "buybox": True}
+
 
 def load_config():
+    cfg = DEFAULTS.copy()
     if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE) as f:
-            saved = json.load(f)
-        return {**DEFAULTS, **saved}
-    return DEFAULTS.copy()
+        try:
+            with open(CONFIG_FILE) as f:
+                cfg.update(json.load(f))
+        except Exception:
+            pass          # unreadable config must never block the app
+    for k, v in UI_FALLBACKS.items():
+        cfg.setdefault(k, v)
+    return cfg
 
 
 def save_config():
@@ -92,9 +109,9 @@ with st.sidebar:
     st.markdown("---")
     st.header("Parameters")
 
-    with st.expander("Keepa API", expanded=not cfg["keepa_key"]):
-        st.text_input("API key", value=cfg["keepa_key"], type="password", key="keepa_key")
-        st.number_input("Cache lookups for (hours)", value=int(cfg["cache_hours"]),
+    with st.expander("Keepa API", expanded=not cfg.get("keepa_key", UI_FALLBACKS["keepa_key"])):
+        st.text_input("API key", value=cfg.get("keepa_key", UI_FALLBACKS["keepa_key"]), type="password", key="keepa_key")
+        st.number_input("Cache lookups for (hours)", value=int(cfg.get("cache_hours", UI_FALLBACKS["cache_hours"])),
                         min_value=0, max_value=168, step=1, key="cache_hours")
         st.checkbox("Skip Keepa lookups for hard-gated markets (saves tokens)",
                     value=bool(cfg["skip_hard_gated"]), key="skip_hard_gated")
@@ -114,35 +131,35 @@ with st.sidebar:
                        f"CAD/USD {live.get('usd_cad')}")
         else:
             st.caption("⚠️ Live rates unavailable — manual values below are used.")
-        st.number_input("EUR → GBP", value=cfg["eur_gbp"], step=0.001, format="%.4f", key="eur_gbp")
-        st.number_input("EUR → USD", value=cfg["eur_usd"], step=0.001, format="%.4f", key="eur_usd")
-        st.number_input("USD → CAD", value=cfg["usd_cad"], step=0.001, format="%.4f", key="usd_cad")
-        st.number_input("EUR → JPY", value=cfg["eur_jpy"], step=0.5, format="%.2f", key="eur_jpy")
-    st.number_input("Digital Svc Fee (%)", value=cfg["dsf"], step=0.5, format="%.1f", key="dsf")
+        st.number_input("EUR → GBP", value=cfg.get("eur_gbp", UI_FALLBACKS["eur_gbp"]), step=0.001, format="%.4f", key="eur_gbp")
+        st.number_input("EUR → USD", value=cfg.get("eur_usd", UI_FALLBACKS["eur_usd"]), step=0.001, format="%.4f", key="eur_usd")
+        st.number_input("USD → CAD", value=cfg.get("usd_cad", UI_FALLBACKS["usd_cad"]), step=0.001, format="%.4f", key="usd_cad")
+        st.number_input("EUR → JPY", value=cfg.get("eur_jpy", UI_FALLBACKS["eur_jpy"]), step=0.5, format="%.2f", key="eur_jpy")
+    st.number_input("Digital Svc Fee (%)", value=cfg.get("dsf", UI_FALLBACKS["dsf"]), step=0.5, format="%.1f", key="dsf")
 
     st.markdown("---")
 
     with st.expander("🇬🇧  UK Parameters", expanded=True):
-        st.number_input("Shipping / unit (EUR)", value=cfg["uk_ship"], step=0.10, format="%.2f", key="uk_ship")
-        st.number_input("Labor / unit (EUR)",    value=cfg["uk_lab"],  step=0.10, format="%.2f", key="uk_lab")
-        st.number_input("FBA fee (GBP)",         value=cfg["uk_fba"],  step=0.01, format="%.2f", key="uk_fba")
-        st.number_input("Referral fee (%)",      value=cfg["uk_ref"],  step=0.5,  format="%.1f", key="uk_ref")
-        st.number_input("VAT rate (%)",          value=cfg["uk_vat"],  step=0.5,  format="%.1f", key="uk_vat")
+        st.number_input("Shipping / unit (EUR)", value=cfg.get("uk_ship", UI_FALLBACKS["uk_ship"]), step=0.10, format="%.2f", key="uk_ship")
+        st.number_input("Labor / unit (EUR)",    value=cfg.get("uk_lab", UI_FALLBACKS["uk_lab"]),  step=0.10, format="%.2f", key="uk_lab")
+        st.number_input("FBA fee (GBP)",         value=cfg.get("uk_fba", UI_FALLBACKS["uk_fba"]),  step=0.01, format="%.2f", key="uk_fba")
+        st.number_input("Referral fee (%)",      value=cfg.get("uk_ref", UI_FALLBACKS["uk_ref"]),  step=0.5,  format="%.1f", key="uk_ref")
+        st.number_input("VAT rate (%)",          value=cfg.get("uk_vat", UI_FALLBACKS["uk_vat"]),  step=0.5,  format="%.1f", key="uk_vat")
 
     with st.expander("🇨🇦  CA Parameters", expanded=True):
-        st.number_input("Shipping / unit (EUR)", value=cfg["ca_ship"], step=0.10, format="%.2f", key="ca_ship")
-        st.number_input("Labor / unit (EUR)",    value=cfg["ca_lab"],  step=0.10, format="%.2f", key="ca_lab")
-        st.number_input("FBA fee (CAD)",         value=cfg["ca_fba"],  step=0.01, format="%.2f", key="ca_fba")
-        st.number_input("Referral fee (%)",      value=cfg["ca_ref"],  step=0.5,  format="%.1f", key="ca_ref")
+        st.number_input("Shipping / unit (EUR)", value=cfg.get("ca_ship", UI_FALLBACKS["ca_ship"]), step=0.10, format="%.2f", key="ca_ship")
+        st.number_input("Labor / unit (EUR)",    value=cfg.get("ca_lab", UI_FALLBACKS["ca_lab"]),  step=0.10, format="%.2f", key="ca_lab")
+        st.number_input("FBA fee (CAD)",         value=cfg.get("ca_fba", UI_FALLBACKS["ca_fba"]),  step=0.01, format="%.2f", key="ca_fba")
+        st.number_input("Referral fee (%)",      value=cfg.get("ca_ref", UI_FALLBACKS["ca_ref"]),  step=0.5,  format="%.1f", key="ca_ref")
 
     with st.expander("🇯🇵  JP Parameters", expanded=True):
         st.caption("One all-in additional cost per unit (shipping, 3PL, FBA, duties), "
                    "split by dangerous goods (EDT/EDP/perfume/aerosol) vs not.")
-        st.number_input("Additional cost DG (EUR)",  value=cfg["jp_add_dg"],  step=0.10, format="%.2f", key="jp_add_dg")
-        st.number_input("Additional cost NDG (EUR)", value=cfg["jp_add_ndg"], step=0.10, format="%.2f", key="jp_add_ndg")
-        st.number_input("Referral fee (%)",          value=cfg["jp_ref"],     step=0.1,  format="%.1f", key="jp_ref")
-        st.number_input("Digital svc fee (% of referral)", value=cfg["jp_dsf"], step=0.1, format="%.1f", key="jp_dsf")
-        st.number_input("Consumption tax (%)",       value=cfg["jp_vat"],     step=0.5,  format="%.1f", key="jp_vat")
+        st.number_input("Additional cost DG (EUR)",  value=cfg.get("jp_add_dg", UI_FALLBACKS["jp_add_dg"]),  step=0.10, format="%.2f", key="jp_add_dg")
+        st.number_input("Additional cost NDG (EUR)", value=cfg.get("jp_add_ndg", UI_FALLBACKS["jp_add_ndg"]), step=0.10, format="%.2f", key="jp_add_ndg")
+        st.number_input("Referral fee (%)",          value=cfg.get("jp_ref", UI_FALLBACKS["jp_ref"]),     step=0.1,  format="%.1f", key="jp_ref")
+        st.number_input("Digital svc fee (% of referral)", value=cfg.get("jp_dsf", UI_FALLBACKS["jp_dsf"]), step=0.1, format="%.1f", key="jp_dsf")
+        st.number_input("Consumption tax (%)",       value=cfg.get("jp_vat", UI_FALLBACKS["jp_vat"]),     step=0.5,  format="%.1f", key="jp_vat")
 
     st.markdown("---")
     if st.button("💾 Save Parameters", use_container_width=True):
@@ -153,7 +170,10 @@ with st.sidebar:
 def effective_params():
     """Parameters used for ROI: manual sidebar values, with live ECB rates on
     top when auto mode is enabled and the feed is reachable."""
-    P = {k: st.session_state.get(k, cfg[k]) for k in core.DEFAULT_PARAMS}
+    keys = set(core.DEFAULT_PARAMS) | {k for k in UI_FALLBACKS
+                                       if k not in ("keepa_key", "cache_hours",
+                                                    "auto_rates", "skip_hard_gated", "buybox")}
+    P = {k: st.session_state.get(k, cfg.get(k, UI_FALLBACKS.get(k))) for k in keys}
     live = cached_live_rates()
     if st.session_state.get("auto_rates", True) and live:
         P.update({k: live[k] for k in RATE_KEYS})
