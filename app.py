@@ -37,7 +37,6 @@ UI_FALLBACKS = {
     "eur_gbp": 0.867, "eur_usd": 1.170, "usd_cad": 1.369, "eur_jpy": 170.0,
     "dsf": 3.0,
     "uk_ship": 0.80, "uk_lab": 2.35, "uk_fba": 3.09, "uk_ref": 15.0, "uk_vat": 20.0,
-    "uk_dsf": 3.0,
     "ca_ship": 3.12, "ca_lab": 2.35, "ca_fba": 7.33, "ca_ref": 15.0,
     "jp_add_dg": 35.32, "jp_add_ndg": 20.21, "jp_ref": 10.4, "jp_dsf": 2.5, "jp_vat": 10.0,
     "keepa_key": "", "cache_hours": 24,
@@ -136,8 +135,11 @@ with st.sidebar:
         st.number_input("EUR → USD", value=cfg.get("eur_usd", UI_FALLBACKS["eur_usd"]), step=0.001, format="%.4f", key="eur_usd")
         st.number_input("USD → CAD", value=cfg.get("usd_cad", UI_FALLBACKS["usd_cad"]), step=0.001, format="%.4f", key="usd_cad")
         st.number_input("EUR → JPY", value=cfg.get("eur_jpy", UI_FALLBACKS["eur_jpy"]), step=0.5, format="%.2f", key="eur_jpy")
-    st.number_input("Digital Svc Fee — CA (%)", value=cfg.get("dsf", UI_FALLBACKS["dsf"]), step=0.5, format="%.1f", key="dsf",
-                    help="Applied to CA referral + FBA. UK has its own field in the UK section; JP in the JP section.")
+    st.number_input("Digital services fee (%)", value=cfg.get("dsf", UI_FALLBACKS["dsf"]),
+                    step=0.5, format="%.1f", key="dsf",
+                    help="Set by our country of establishment (Spain = 3%), so the same rate applies "
+                         "on UK and CA — charged on referral + FBA. Japan has its own rate in the "
+                         "JP section.")
 
     st.markdown("---")
 
@@ -147,10 +149,6 @@ with st.sidebar:
         st.number_input("FBA fee (GBP)",         value=cfg.get("uk_fba", UI_FALLBACKS["uk_fba"]),  step=0.01, format="%.2f", key="uk_fba")
         st.number_input("Referral fee (%)",      value=cfg.get("uk_ref", UI_FALLBACKS["uk_ref"]),  step=0.5,  format="%.1f", key="uk_ref")
         st.number_input("VAT rate (%)",          value=cfg.get("uk_vat", UI_FALLBACKS["uk_vat"]),  step=0.5,  format="%.1f", key="uk_vat")
-        st.number_input("Digital svc fee (% of referral+FBA)",
-                        value=cfg.get("uk_dsf", UI_FALLBACKS["uk_dsf"]), step=0.5, format="%.1f", key="uk_dsf",
-                        help="Deducted from profit here. The UB cost calculator shows but does not "
-                             "deduct it for UK, so it reads ~1pp higher. Set 0 to match the calculator.")
 
     with st.expander("🇨🇦  CA Parameters", expanded=True):
         st.number_input("Shipping / unit (EUR)", value=cfg.get("ca_ship", UI_FALLBACKS["ca_ship"]), step=0.10, format="%.2f", key="ca_ship")

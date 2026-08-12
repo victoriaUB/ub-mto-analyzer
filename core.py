@@ -20,9 +20,11 @@ import requests
 
 DEFAULT_PARAMS = {
     "eur_gbp": 0.867, "eur_usd": 1.170, "usd_cad": 1.369, "eur_jpy": 170.0,
+    # Amazon's digital services fee follows the SELLER's country of establishment,
+    # not the marketplace: UB is Spain-registered, so 3% on UK and CA alike.
+    # Japan is kept separate at 2.5% (see jp_dsf) per the JP cost model.
     "dsf":     3.0,
     "uk_ship": 0.80,  "uk_lab": 2.35,  "uk_fba": 3.09, "uk_ref": 15.0, "uk_vat": 20.0,
-    "uk_dsf": 3.0,    # digital services fee, % of (referral + FBA) — same basis as CA
     "ca_ship": 3.12,  "ca_lab": 2.35,  "ca_fba": 7.33, "ca_ref": 15.0,
     # Japan: one all-in additional cost per unit (shipping/3PL/FBA/duties),
     # split by dangerous goods (alcohol-based: EDT/EDP/perfume) vs not.
@@ -90,7 +92,7 @@ def calc_uk(p_eur, s_gbp, P, is_dg=True):
     cogs = (p_eur + P["uk_ship"] + P["uk_lab"]) * rate
     s    = s_gbp / (1 + P["uk_vat"] / 100)
     ref  = s * P["uk_ref"] / 100
-    dsf  = (ref + P["uk_fba"]) * P.get("uk_dsf", 0.0) / 100
+    dsf  = (ref + P["uk_fba"]) * P.get("dsf", 0.0) / 100
     ppu  = s - cogs - P["uk_fba"] - ref - dsf
     return ppu / cogs if cogs > 0 else 0
 
