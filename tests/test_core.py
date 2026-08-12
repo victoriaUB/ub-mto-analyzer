@@ -58,11 +58,24 @@ def test_items_from_dataframe_missing_columns():
 
 # ─── ROI formulas (pinned against the UB cost calculator reconciliation) ──────
 
-def test_calc_uk_known_value():
+def test_calc_uk_matches_calculator_when_dsf_off():
+    """With uk_dsf=0 the formula reproduces the UB cost calculator exactly
+    (-6.0%) — the calculator shows the digital services fee but does not
+    deduct it from profit."""
     p = {**P, "eur_gbp": 0.8558, "uk_ship": 0.80, "uk_lab": 2.35,
-         "uk_fba": 3.09, "uk_ref": 15.0, "uk_vat": 20.0}
-    roi = core.calc_uk(85.45, 104.94, p)
-    assert abs(roi * 100 - (-6.0)) < 0.1        # matches UB calculator: -6.0%
+         "uk_fba": 3.09, "uk_ref": 15.0, "uk_vat": 20.0, "uk_dsf": 0.0}
+    assert abs(core.calc_uk(85.45, 104.94, p) * 100 - (-6.0)) < 0.1
+
+
+def test_calc_uk_deducts_digital_services_fee():
+    """Default behaviour: the fee IS deducted, so ROI is ~1pp lower."""
+    base = {**P, "eur_gbp": 0.8558, "uk_ship": 0.80, "uk_lab": 2.35,
+            "uk_fba": 3.09, "uk_ref": 15.0, "uk_vat": 20.0}
+    off = core.calc_uk(85.45, 104.94, {**base, "uk_dsf": 0.0}) * 100
+    on = core.calc_uk(85.45, 104.94, {**base, "uk_dsf": 3.0}) * 100
+    assert on < off
+    assert abs((off - on) - 0.64) < 0.05        # 3% of (referral + FBA), over COGS
+    assert core.DEFAULT_PARAMS["uk_dsf"] == 3.0
 
 
 def test_calc_ca_positive():

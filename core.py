@@ -22,6 +22,7 @@ DEFAULT_PARAMS = {
     "eur_gbp": 0.867, "eur_usd": 1.170, "usd_cad": 1.369, "eur_jpy": 170.0,
     "dsf":     3.0,
     "uk_ship": 0.80,  "uk_lab": 2.35,  "uk_fba": 3.09, "uk_ref": 15.0, "uk_vat": 20.0,
+    "uk_dsf": 3.0,    # digital services fee, % of (referral + FBA) — same basis as CA
     "ca_ship": 3.12,  "ca_lab": 2.35,  "ca_fba": 7.33, "ca_ref": 15.0,
     # Japan: one all-in additional cost per unit (shipping/3PL/FBA/duties),
     # split by dangerous goods (alcohol-based: EDT/EDP/perfume) vs not.
@@ -78,12 +79,19 @@ def is_dangerous_goods(title, brand=""):
 # ─── ROI CALCULATIONS ─────────────────────────────────────────────────────────
 
 def calc_uk(p_eur, s_gbp, P, is_dg=True):
-    """ROI for UK. Sell price incl. VAT; referral on ex-VAT price; VAT not in COGS."""
+    """ROI for UK. Sell price incl. VAT; referral on ex-VAT price; VAT not in COGS.
+
+    The digital services fee IS deducted here (% of referral + FBA, same basis as
+    CA/AU). Note: the UB cost calculator displays this fee but does not subtract
+    it from profit — it mirrors the original UK spreadsheet — so its UK ROI reads
+    ~1pp higher than this one until that is changed. Set uk_dsf=0 to match it.
+    """
     rate = P["eur_gbp"]
     cogs = (p_eur + P["uk_ship"] + P["uk_lab"]) * rate
     s    = s_gbp / (1 + P["uk_vat"] / 100)
     ref  = s * P["uk_ref"] / 100
-    ppu  = s - cogs - P["uk_fba"] - ref
+    dsf  = (ref + P["uk_fba"]) * P.get("uk_dsf", 0.0) / 100
+    ppu  = s - cogs - P["uk_fba"] - ref - dsf
     return ppu / cogs if cogs > 0 else 0
 
 
