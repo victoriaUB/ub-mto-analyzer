@@ -43,7 +43,7 @@ DEFAULT_SENDER = "andreina@engelsa.com"
 DEFAULT_CHANNEL = "C01V52LDVFW"          # #fb_purchase_es
 MATRIX_PATH = os.path.join(os.path.dirname(__file__), "..", "brand_matrix.csv")
 GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me"
-ATTACHMENT_EXTS = (".xlsx", ".xls", ".csv")
+ATTACHMENT_EXTS = (".xlsx", ".xls", ".csv", ".eml")
 SUMMARY_TOP_N = 10
 
 
@@ -121,7 +121,12 @@ def mark_processed(token, msg_id, label_id):
 def parse_offer_file(filename, data, default_brand=""):
     """(items, skipped, sheet_report). Excel workbooks are parsed sheet by
     sheet — attachments often hold more products than the email body, split
-    across tabs."""
+    across tabs. A .eml attachment (offer forwarded as an attachment) is parsed
+    recursively: its own body table plus any spreadsheet inside it."""
+    if filename.lower().endswith(".eml"):
+        from parse_eml import items_from_eml
+        items, subject, brand, terms, sources = items_from_eml(data, filename)
+        return items, 0, {f"{filename} ({brand or subject})": "; ".join(sources)}
     if filename.lower().endswith(".csv"):
         items, skipped, _ = core.items_from_dataframe(
             pd.read_csv(io.BytesIO(data)), default_brand)
