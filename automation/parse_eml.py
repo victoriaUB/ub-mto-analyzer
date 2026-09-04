@@ -31,8 +31,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import core  # noqa: E402
 
 SHEET_EXTS = (".xlsx", ".xls", ".csv")
-TERM_KEYWORDS = ["MOQ", "MOA", "DELIVERY", "MADE TO ORDER", "SUBJECT TO UNSOLD",
-                 "EXPIR", "PAYMENT"]
+# "DELVERY" is Andreina's recurring typo — without it the lead time is dropped
+TERM_KEYWORDS = ["MOQ", "MOA", "DELIVERY", "DELVERY", "MADE TO ORDER",
+                 "SUBJECT TO UNSOLD", "EXPIR", "PAYMENT"]
 # Complete phrases — emit as-is instead of slicing forward into the product table
 TERM_PHRASES = {"MADE TO ORDER", "SUBJECT TO UNSOLD"}
 
@@ -66,6 +67,56 @@ def offer_terms(text):
         if seg and not any(seg.upper() in t.upper() for t in terms):
             terms = [t for t in terms if t.upper() not in seg.upper()] + [seg]
     return terms
+
+
+EAN_LINE = re.compile(r"^EAN\s*:?\s*(\d[\d\s-]{6,16})$", re.I)
+PRICE_LINE = re.compile(r"PRICE\s*:?\s*\**\s*([\d]+[.,]?\d*)\s*(?:€|EUR)", re.I)
+QTY_LINE = re.compile(r"^QTY\b", re.I)
+SKIP_LINE = re.compile(r"^(MOQ|MOA|DELIVERY|DELVERY|MADE TO ORDER|SUBJECT TO|"
+                       r"EXPIR|PAYMENT|BEST REGARDS|PRE-ORDER|EMAIL|TLF|FAX|"
+                       r"WEBSITE|DIRECCI|ANTES DE|CUIDEMOS|FROM|TO|CC|DATE|"
+                       r"SUBJECT|-{3,}|\[image)", re.I)
+
+
+def items_from_text(text, brand=""):
+    """Fallback for offers written as Word-style paragraphs instead of a table:
+
+        *AZZARO SPORT EDT VAPO 100 ML (new pack)*
+        EAN 3614273667418
+        QTY: 150 PCS
+        *PRICE: 12.80€*
+
+    Each EAN line anchors one product: the title is the nearest preceding
+    descriptive line, the price the next PRICE line after it.
+    """
+    lines = [re.sub(r"\*+", "", ln).strip() for ln in (text or "").splitlines()]
+    lines = [ln for ln in lines if ln]
+    items, seen = [], set()
+    for i, ln in enumerate(lines):
+        m = EAN_LINE.match(ln)
+        if not m:
+            continue
+        ean = core.normalize_ean(m.group(1))
+        if not ean or ean in seen:
+            continue
+        price = None
+        for nxt in lines[i + 1:i + 5]:
+            pm = PRICE_LINE.search(nxt)
+            if pm:
+                price = float(pm.group(1).replace(",", "."))
+                break
+        if price is None or price <= 0:
+            continue
+        title = ""
+        for prev in reversed(lines[:i]):
+            if (EAN_LINE.match(prev) or QTY_LINE.match(prev) or SKIP_LINE.match(prev)
+                    or PRICE_LINE.search(prev) or not re.search(r"[A-Za-z]{3}", prev)):
+                continue
+            title = prev
+            break
+        seen.add(ean)
+        items.append({"ean": ean, "title": title, "price_eur": price, "brand": brand})
+    return items
 
 
 def _walk(msg):
@@ -137,6 +188,10 @@ def items_from_eml(path_or_bytes, name=""):
                     break
         elif ctype == "text/plain":
             text_parts.append(part.get_content())
+
+    if not items:
+        got = items_from_text("\n".join(text_parts), brand)
+        add(got, "email body (paragraph format)")
 
     return items, subject, brand, offer_terms("\n".join(text_parts)), sources
 
