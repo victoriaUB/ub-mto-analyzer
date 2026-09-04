@@ -38,6 +38,7 @@ UI_FALLBACKS = {
     "dsf": 3.0,
     "uk_ship": 0.80, "uk_lab": 2.35, "uk_fba": 3.09, "uk_ref": 15.0, "uk_vat": 20.0,
     "ca_ship": 3.12, "ca_lab": 2.35, "ca_fba": 7.33, "ca_ref": 15.0,
+    "us_ship": 3.34, "us_add": 2.35, "us_tariff": 10.0, "us_fba": 5.43, "us_ref": 15.0,
     "jp_add_dg": 35.32, "jp_add_ndg": 20.21, "jp_ref": 10.4, "jp_dsf": 2.5, "jp_vat": 10.0,
     "keepa_key": "", "cache_hours": 24,
     "auto_rates": True, "skip_hard_gated": True, "buybox": True,
@@ -138,8 +139,9 @@ with st.sidebar:
     st.number_input("Digital services fee (%)", value=cfg.get("dsf", UI_FALLBACKS["dsf"]),
                     step=0.5, format="%.1f", key="dsf",
                     help="Set by our country of establishment (Spain = 3%), so the same rate applies "
-                         "on UK and CA — charged on referral + FBA. Japan has its own rate in the "
-                         "JP section.")
+                         "on every market — charged on referral + FBA for UK/CA, and on the referral "
+                         "alone for US/JP (their FBA is handled separately). Japan overrides the "
+                         "rate in its own section.")
 
     st.markdown("---")
 
@@ -155,6 +157,16 @@ with st.sidebar:
         st.number_input("Labor / unit (EUR)",    value=cfg.get("ca_lab", UI_FALLBACKS["ca_lab"]),  step=0.10, format="%.2f", key="ca_lab")
         st.number_input("FBA fee (CAD)",         value=cfg.get("ca_fba", UI_FALLBACKS["ca_fba"]),  step=0.01, format="%.2f", key="ca_fba")
         st.number_input("Referral fee (%)",      value=cfg.get("ca_ref", UI_FALLBACKS["ca_ref"]),  step=0.5,  format="%.1f", key="ca_ref")
+
+    with st.expander("🇺🇸  US Parameters", expanded=True):
+        st.caption("Landed cost = (goods + shipping) × (1 + tariff) + additional. "
+                   "Keepa's US price is tax-exclusive, so nothing is stripped from it.")
+        st.number_input("Shipping / unit (EUR)",   value=cfg.get("us_ship", UI_FALLBACKS["us_ship"]), step=0.10, format="%.2f", key="us_ship")
+        st.number_input("Additional / unit (EUR)", value=cfg.get("us_add", UI_FALLBACKS["us_add"]),  step=0.10, format="%.2f", key="us_add")
+        st.number_input("Import tariff (%)",       value=cfg.get("us_tariff", UI_FALLBACKS["us_tariff"]), step=0.5, format="%.1f", key="us_tariff",
+                        help="Ad-valorem, applied to goods + shipping and included in COGS.")
+        st.number_input("FBA fee (USD)",           value=cfg.get("us_fba", UI_FALLBACKS["us_fba"]),  step=0.01, format="%.2f", key="us_fba")
+        st.number_input("Referral fee (%)",        value=cfg.get("us_ref", UI_FALLBACKS["us_ref"]),  step=0.5,  format="%.1f", key="us_ref")
 
     with st.expander("🇯🇵  JP Parameters", expanded=True):
         st.caption("One all-in additional cost per unit (shipping, 3PL, FBA, duties), "

@@ -26,6 +26,10 @@ DEFAULT_PARAMS = {
     "dsf":     3.0,
     "uk_ship": 0.80,  "uk_lab": 2.35,  "uk_fba": 3.09, "uk_ref": 15.0, "uk_vat": 20.0,
     "ca_ship": 3.12,  "ca_lab": 2.35,  "ca_fba": 7.33, "ca_ref": 15.0,
+    # US: landed cost = (goods + shipping) x (1 + tariff) + additional, per the
+    # toolkit's costs.cogs_local(); tariff is ad-valorem on goods + shipping.
+    "us_ship": 3.34, "us_add": 2.35, "us_tariff": 10.0,
+    "us_fba": 5.43, "us_ref": 15.0,
     # Japan: one all-in additional cost per unit (shipping/3PL/FBA/duties),
     # split by dangerous goods (alcohol-based: EDT/EDP/perfume) vs not.
     "jp_add_dg": 35.32, "jp_add_ndg": 20.21,
@@ -109,6 +113,27 @@ def calc_ca(p_eur, s_cad, P, is_dg=True):
     return ppu / cogs if cogs > 0 else 0
 
 
+def calc_us(p_eur, s_usd, P, is_dg=True):
+    """ROI for Amazon US, computed in USD.
+
+    Keepa's US price is tax-exclusive (Amazon collects and remits US sales tax
+    as marketplace facilitator), so nothing is stripped from the sell price.
+    Landed COGS follows the toolkit's cost model: the ad-valorem import tariff
+    applies to goods + shipping, then the per-market additional cost is added.
+
+    The digital services fee here is charged on the referral fee ALONE — that is
+    what UB's Seller Snap Costs tab shows for US (3.001% of referral across 116
+    rows, Aug 2026). UK/CA in this file charge it on referral + FBA; if the US
+    basis turns out to be the correct one everywhere, those two should change too.
+    """
+    cogs = ((p_eur + P["us_ship"]) * (1 + P["us_tariff"] / 100)
+            + P["us_add"]) * P["eur_usd"]
+    ref = s_usd * P["us_ref"] / 100
+    dsf = ref * P.get("dsf", 0.0) / 100
+    ppu = s_usd - cogs - ref - dsf - P["us_fba"]
+    return ppu / cogs if cogs > 0 else 0
+
+
 def calc_jp(p_eur, s_jpy, P, is_dg=True):
     """ROI for Amazon Japan, computed in EUR.
 
@@ -135,6 +160,7 @@ MARKETS = {
     "CA": {"domain": 6, "currency": "CAD", "calc": calc_ca, "price_divisor": 100},
     "UK": {"domain": 2, "currency": "GBP", "calc": calc_uk, "price_divisor": 100},
     "JP": {"domain": 5, "currency": "JPY", "calc": calc_jp, "price_divisor": 1},
+    "US": {"domain": 1, "currency": "USD", "calc": calc_us, "price_divisor": 100},
 }
 KEEPA_DOMAINS = {m: cfg["domain"] for m, cfg in MARKETS.items()}
 

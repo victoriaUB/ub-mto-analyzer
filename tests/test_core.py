@@ -290,6 +290,42 @@ def test_status_hard_gated_all_markets():
     assert core.status_summary_lines(df)[0].startswith("1 EANs hard-gated")
 
 
+# ─── United States ────────────────────────────────────────────────────────────
+
+def test_calc_us_fee_stack_matches_seller_snap():
+    """Fee side verified against UB's Seller Snap Costs tab (Aug 2026):
+    price $98.99, landed cost $66.49, FBA $5.43 -> profit $11.77, ROI 17.71%.
+    Fed the same landed cost by back-solving the goods price."""
+    p = {**P, "eur_usd": 1.169}
+    # goods price that produces exactly $66.49 landed
+    goods = ((66.49 / p["eur_usd"]) - p["us_add"]) / 1.10 - p["us_ship"]
+    roi = core.calc_us(goods, 98.99, p) * 100
+    assert abs(roi - 17.71) < 0.05
+
+
+def test_calc_us_tariff_is_in_cogs():
+    p = {**P, "eur_usd": 1.169}
+    with_tariff = core.calc_us(46.03, 98.99, p)
+    without = core.calc_us(46.03, 98.99, {**p, "us_tariff": 0.0})
+    assert without > with_tariff          # tariff raises COGS, lowers ROI
+
+
+def test_calc_us_no_tax_stripped_from_sell_price():
+    """US sell price is tax-exclusive: doubling it must roughly double revenue,
+    with no VAT divisor involved."""
+    p = {**P, "eur_usd": 1.169, "us_ref": 0.0, "us_fba": 0.0, "dsf": 0.0}
+    cogs = ((46.03 + p["us_ship"]) * 1.10 + p["us_add"]) * p["eur_usd"]
+    roi = core.calc_us(46.03, 100.0, p)
+    assert abs(roi - (100.0 - cogs) / cogs) < 1e-9
+
+
+def test_us_market_registered():
+    assert core.MARKETS["US"]["domain"] == 1          # Keepa domain for amazon.com
+    assert core.MARKETS["US"]["price_divisor"] == 100  # USD has cents, unlike JPY
+    assert "ROI US" in core.RESULT_COLUMNS and "Gating US" in core.RESULT_COLUMNS
+    assert "US" in core.MATRIX_MARKETS                 # gating column already exists
+
+
 # ─── Japan ────────────────────────────────────────────────────────────────────
 
 def test_calc_jp_matches_worked_example():
