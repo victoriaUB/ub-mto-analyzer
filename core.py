@@ -157,10 +157,15 @@ def calc_jp(p_eur, s_jpy, P, is_dg=True):
 MARKETS = {
     # price_divisor: Keepa returns prices in the currency's smallest unit —
     # cents for GBP/CAD (÷100), but JPY has no minor unit so values are whole yen.
-    "CA": {"domain": 6, "currency": "CAD", "calc": calc_ca, "price_divisor": 100},
-    "UK": {"domain": 2, "currency": "GBP", "calc": calc_uk, "price_divisor": 100},
+    "CA": {"domain": 6, "currency": "CAD", "calc": calc_ca, "price_divisor": 100,
+           "fba_key": "ca_fba"},
+    "UK": {"domain": 2, "currency": "GBP", "calc": calc_uk, "price_divisor": 100,
+           "fba_key": "uk_fba"},
+    # JP has no fba_key: its fulfilment sits inside the all-in additional cost,
+    # so Keepa's JP FBA fee must NOT be added on top.
     "JP": {"domain": 5, "currency": "JPY", "calc": calc_jp, "price_divisor": 1},
-    "US": {"domain": 1, "currency": "USD", "calc": calc_us, "price_divisor": 100},
+    "US": {"domain": 1, "currency": "USD", "calc": calc_us, "price_divisor": 100,
+           "fba_key": "us_fba"},
 }
 KEEPA_DOMAINS = {m: cfg["domain"] for m, cfg in MARKETS.items()}
 
@@ -278,7 +283,11 @@ def stat_rank(stats, arr_name, idx):
 def extract_product(p, price_divisor=100):
     """Reduce a Keepa product object to the fields we need."""
     stats = p.get("stats") or {}
+    fba = (p.get("fbaFees") or {}).get("pickAndPackFee")
     return {
+        # Real per-product FBA fee in marketplace currency. A flat sidebar
+        # default cannot know a product's size/weight band; this can.
+        "fba_fee": fba / price_divisor if fba else None,
         "asin": p.get("asin"),
         "title": p.get("title"),
         "brand": p.get("brand"),
@@ -682,7 +691,15 @@ def build_result_df(items, market_data, matrix, params, skipped_pairs=None):
                 if not it["title"] and d.get("title"):
                     row["Product"] = d["title"]
             if sell is not None:
-                roi = round(calc(it["price_eur"], sell, P, is_dg) * 100, 1)
+                # Prefer the product's real FBA fee; fall back to the flat
+                # parameter when Keepa has none (or a pre-v5 cache entry).
+                P_market = P
+                fba_key = cfg.get("fba_key")
+                if fba_key and d and d.get("fba_fee"):
+                    P_market = {**P, fba_key: d["fba_fee"]}
+                elif fba_key and d:
+                    notes.append(f"{market}: FBA fee is the flat default")
+                roi = round(calc(it["price_eur"], sell, P_market, is_dg) * 100, 1)
             row[f"ASIN {market}"] = asin
             row[f"Sell {market} ({cur})"] = round(sell, 2) if sell is not None else None
             row[f"Sell {market}"] = row[f"Sell {market} ({cur})"]

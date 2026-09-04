@@ -319,6 +319,43 @@ def test_calc_us_no_tax_stripped_from_sell_price():
     assert abs(roi - (100.0 - cogs) / cogs) < 1e-9
 
 
+def test_extract_product_captures_fba_fee():
+    p = core.extract_product({"asin": "A", "title": "t", "eanList": [],
+                              "fbaFees": {"pickAndPackFee": 611},
+                              "stats": {"avg90": [0]*18 + [23494], "avg30": [0, 0, 0, 900]}}, 100)
+    assert p["fba_fee"] == 6.11
+    # JPY: whole-yen divisor applies to fees too
+    j = core.extract_product({"asin": "A", "title": "t", "eanList": [],
+                              "fbaFees": {"pickAndPackFee": 550}, "stats": {}}, 1)
+    assert j["fba_fee"] == 550
+    assert core.extract_product({"asin": "A", "eanList": [], "stats": {}})["fba_fee"] is None
+
+
+def test_per_product_fba_fee_beats_flat_default():
+    """Keepa's real fee must win; without it, the row says so."""
+    m = core.matrix_from_df(pd.DataFrame({"Brand": ["Prada"], "US": ["ok"], "CA": ["ok"],
+                                          "UK": ["ok"], "AU": [""], "JP": [""], "Notes": [""]}))
+    items = [{"ean": "1", "title": "Prada EDP", "price_eur": 109.13, "brand": "Prada"}]
+
+    def mk(fee):
+        return {"asin": "A1", "title": "t", "brand": "Prada", "eans": [], "buybox90": 234.94,
+                "new90": None, "rank30": 900, "fba_fee": fee}
+
+    p = {**P, "eur_usd": 1.169}
+    with_fee = core.build_result_df(items, {"US": {"1": mk(6.11)}}, m, p).iloc[0]
+    without = core.build_result_df(items, {"US": {"1": mk(None)}}, m, p).iloc[0]
+    assert with_fee["ROI US"] < without["ROI US"]          # 6.11 > 5.43 default
+    assert "flat default" in without["Notes"]
+    assert "flat default" not in (with_fee["Notes"] or "")
+
+
+def test_jp_ignores_keepa_fba_fee():
+    """JP fulfilment is inside the all-in additional cost — adding Keepa's JP
+    FBA fee on top would double-count it."""
+    assert "fba_key" not in core.MARKETS["JP"]
+    assert all("fba_key" in core.MARKETS[m] for m in ("US", "UK", "CA"))
+
+
 def test_us_market_registered():
     assert core.MARKETS["US"]["domain"] == 1          # Keepa domain for amazon.com
     assert core.MARKETS["US"]["price_divisor"] == 100  # USD has cents, unlike JPY
