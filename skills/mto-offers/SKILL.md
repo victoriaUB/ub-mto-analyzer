@@ -18,6 +18,7 @@ does, plus the analysis.
 | Sender | andreina@engelsa.com |
 | Slack channel | C01V52LDVFW (#fb_purchase_es) |
 | Processed log | ~/.claude/mto-offers-processed.txt |
+| Drive output folder | `1sXcJoxOkgqfJh-8BOP59xBJwpDwHwWqL` ("MTO Analyses — Products Analyzer output") |
 | Analyzer repo | ~/Documents/ub-mto-analyzer |
 | Tag always | `<@U0550FKCXEX>` Rita, `<@U05C2GHL7G8>` Sonya |
 | Tag on "no listing" status | `<@U0795R217CJ>` Anastasia Kozyreva (listings creation), FIRST in the greeting |
@@ -81,11 +82,29 @@ quote them in the post, one per line, skipping empty categories:
 
 Markets: CA, UK, JP (Keepa domains 6/2/5). Also make the full table downloadable:
 create a Google Sheet via the Drive connector (`create_file`, contentMimeType
-text/csv → converts to a Sheet) and link it next to the canvas link.
+text/csv → converts to a Sheet). **Always pass
+`parentId: "1sXcJoxOkgqfJh-8BOP59xBJwpDwHwWqL"`** — files created at the Drive
+root are private to Victoria and the team cannot open them (this happened on
+2026-09-04). That folder is shared with the team, and children inherit its
+access. The Drive connector has no permission-setting tool, so the parent
+folder is the only way to make output readable.
 
 ### 6. Post to Slack
 `slack_send_message` to `C01V52LDVFW` (mentions as literal `<@U…>`, never
-HTML-escaped). Greeting depends on status: if the offer contains ANY 🆕 no-listing
+HTML-escaped).
+
+**Link formatting — two rules, both learned the hard way:**
+1. Put a BLANK LINE between any two consecutive lines that end in / start
+   after a URL. Adjacent link lines get merged: Slack swallowed a newline and
+   the following emoji into the href and broke the canvas link in all five
+   posts on 2026-09-04.
+2. Never place a URL immediately before the mentions/FYI line either — same
+   failure.
+
+**Where Daria posted the same offer**, reply in HER message's thread
+(`thread_ts` = that brand's message ts) rather than starting a new post; she
+posts one message per brand, not one thread for the batch. Brands she did not
+post get a standalone message. Greeting depends on status: if the offer contains ANY 🆕 no-listing
 products, Anastasia comes first; otherwise only Rita + Sonya. For mixed
 offers the Status line already carries the per-category breakdown — quote it
 as-is.
