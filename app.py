@@ -27,7 +27,8 @@ st.caption("Check products by EAN — enter them manually or upload a file. "
 APP_DIR = os.path.dirname(__file__)
 CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 CACHE_FILE = os.path.join(APP_DIR, "keepa_cache.json")
-MATRIX_FILE = os.path.join(APP_DIR, "brand_matrix.csv")
+MATRIX_FILE = os.path.join(APP_DIR, "brand_matrix.csv")        # fallback snapshot
+OVERRIDES_FILE = os.path.join(APP_DIR, "brand_overrides.csv")  # our own decisions
 # Per-EAN freight from the COGS Shipping Calculator sheet. Gitignored (internal
 # cost data, public repo) — absent on the cloud app, which then uses the flat
 # per-market rates and says so on the affected rows.
@@ -121,9 +122,12 @@ def load_shipping_table():
     return core.resolve_shipping_table(shipping_creds(), SHIPPING_FILE)
 
 
-@st.cache_data(ttl=60, show_spinner=False)
-def load_matrix_df():
-    return pd.read_csv(MATRIX_FILE, dtype=str).fillna("")
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_matrix_df(_cache_key=0):
+    """(df, source, conflicts). The listing team's Google Sheet is the source of
+    truth; the bundled CSV is only a fallback when it can't be reached."""
+    df, source = core.resolve_brand_matrix(shipping_creds(), MATRIX_FILE, OVERRIDES_FILE)
+    return df, source, list(core.BRAND_CONFLICTS)
 
 
 cfg = load_config()
@@ -143,6 +147,10 @@ with st.sidebar:
                     value=bool(cfg["skip_hard_gated"]), key="skip_hard_gated")
         _ship_tbl, _cust_tbl, _ship_src = load_shipping_table()
         st.caption(f"Per-EAN freight: **{_ship_src}**")
+        try:
+            st.caption(f"Brand gating: **{load_matrix_df()[1]}**")
+        except Exception as _e:
+            st.caption(f"Brand gating: **unavailable** ({_e})")
         st.checkbox("Request Buy Box prices (3 tokens/product instead of 1)",
                     value=bool(cfg.get("buybox", True)), key="buybox",
                     help="Buy Box is the accurate sell-price proxy. Off = cheaper, "
@@ -230,42 +238,62 @@ def effective_params():
 
 if page == "🏷️ Brand Matrix":
     st.subheader("Brand gating matrix")
-    st.caption("ok = we can sell · has path to apply = gated but can apply · Hard Gated = can't sell · "
-               "empty = to be checked. Add new brands in the last row.")
     try:
-        matrix_df = load_matrix_df()
+        matrix_df, matrix_source, conflicts = load_matrix_df()
     except Exception as e:
         st.error(f"Could not load brand matrix: {e}")
         st.stop()
 
-    edited_df = st.data_editor(
-        matrix_df,
-        num_rows="dynamic",
-        use_container_width=True,
-        height=600,
+    st.caption(f"Source: **{matrix_source}**")
+    st.markdown(f"Amazon gating is maintained by the listing team in "
+                f"[Amazon Global Selling Restrictions & Approvals]({core.BRAND_SHEET_URL}) "
+                "— edit it there and it flows in here. The statuses in that sheet are the "
+                "**cell colours** (green = ok, orange = can apply, red = hard gated), "
+                "which is what this tool reads.")
+    if st.button("🔄 Refresh from sheet"):
+        load_matrix_df.clear()
+        st.rerun()
+
+    if conflicts:
+        with st.expander(f"⚠️ {len(conflicts)} duplicate brand row(s) in the sheet — "
+                         "merged strictest-wins"):
+            for c in conflicts:
+                st.write(f"• {c}")
+            st.caption("Worth cleaning up in the sheet so there is one row per brand.")
+
+    st.dataframe(matrix_df, use_container_width=True, height=420, hide_index=True)
+    st.download_button("⬇️ Download matrix (.csv)", data=matrix_df.fillna("").to_csv(index=False),
+                       file_name="brand_matrix.csv", mime="text/csv")
+
+    st.markdown("---")
+    st.subheader("Our own exclusions")
+    st.caption("Brands we choose not to sell for reasons that have nothing to do with Amazon "
+               "— import complexity, brand policy, margin. These win over the sheet. "
+               "Use **do not sell** and always fill in the reason.")
+    overrides = core.load_brand_overrides(OVERRIDES_FILE)
+    if overrides is None or overrides.empty:
+        overrides = pd.DataFrame(columns=["Brand"] + core.MATRIX_MARKETS + ["Notes"])
+    edited = st.data_editor(
+        overrides, num_rows="dynamic", use_container_width=True, hide_index=True,
         column_config={
             "Brand": st.column_config.TextColumn("Brand", required=True),
             **{m: st.column_config.SelectboxColumn(m, options=core.STATUS_OPTIONS, required=False)
                for m in core.MATRIX_MARKETS},
-            "Notes": st.column_config.TextColumn("Notes", width="large"),
+            "Notes": st.column_config.TextColumn("Reason", width="large"),
         },
     )
-
-    if st.button("💾 Save matrix", type="primary"):
-        clean = edited_df.fillna("")
+    if st.button("💾 Save exclusions", type="primary"):
+        clean = edited.fillna("")
         clean = clean[clean["Brand"].astype(str).str.strip() != ""]
-        dupes = clean["Brand"].astype(str).str.strip().str.casefold().duplicated()
-        if dupes.any():
-            st.error(f"Duplicate brand name(s): {', '.join(clean.loc[dupes, 'Brand'].unique())} — merge them first.")
+        missing = clean[clean["Notes"].astype(str).str.strip() == ""]
+        if len(missing):
+            st.error(f"Add a reason for: {', '.join(missing['Brand'].astype(str))}")
         else:
-            clean.to_csv(MATRIX_FILE, index=False)
+            clean.to_csv(OVERRIDES_FILE, index=False)
             load_matrix_df.clear()
-            st.success(f"Saved — {len(clean)} brands.")
-
-    st.download_button("⬇️ Download matrix (.csv)", data=edited_df.fillna("").to_csv(index=False),
-                       file_name="brand_matrix.csv", mime="text/csv")
-    st.caption("Note: on the cloud app, saved edits last until Streamlit restarts the app "
-               "(then it reverts to the repo copy). Download a backup after big edit sessions.")
+            st.success(f"Saved — {len(clean)} exclusion(s).")
+    st.caption("On the cloud app, saved exclusions last until Streamlit restarts "
+               "(then it reverts to the repo copy) — tell Victoria to commit anything permanent.")
     st.stop()
 
 # ─── PAGE: ANALYZER ───────────────────────────────────────────────────────────
@@ -350,7 +378,7 @@ st.markdown(f"**{len(items)} unique products** ready. "
             "(less with cache and gating skips).")
 
 try:
-    matrix_df = load_matrix_df()
+    matrix_df, _matrix_source, _ = load_matrix_df()
     matrix_error = None
 except Exception as e:
     matrix_df = None
