@@ -914,6 +914,7 @@ VERDICT_PRICE_GAP = "🔴 sells, but not at a price that pays"
 VERDICT_DEAD = "⚫ nobody selling"
 VERDICT_LOW_ROI = "⚪ below ROI bar"
 VERDICT_GATED = "🚫 gated"
+VERDICT_NO_SELL = "🚫 we do not sell this brand"
 
 
 def breakeven_sell(market, p_eur, P, is_dg=True, roi_target=None, fba_fee=None):
@@ -941,13 +942,17 @@ def _positive_verdict(gate_rank):
     return {GATE_OK: VERDICT_BUY, GATE_APPLY: VERDICT_SOFT}.get(gate_rank, VERDICT_POSSIBLE)
 
 
-def market_verdict(d, roi, gate_rank, roi_threshold=ROI_THRESHOLD):
+def market_verdict(d, roi, gate_rank, roi_threshold=ROI_THRESHOLD, gate_label=None):
     """(verdict, est_units_per_month, note) for one product on one market.
 
     d is the extracted Keepa record; roi is the computed ROI %; gate_rank the
     gating level. Follows the fixed order: gated → selling? → demand? → money?
     """
     if gate_rank == GATE_HARD:
+        # "we chose not to" and "Amazon won't let us" both stop the buy, but
+        # only one of them is worth appealing — say which.
+        if gate_label == GATE_NO_SELL_LABEL:
+            return VERDICT_NO_SELL, None, ""
         return VERDICT_GATED, None, ""
     if not d:
         return VERDICT_DEAD, None, "no listing found"
@@ -1240,7 +1245,9 @@ def build_result_df(items, market_data, matrix, params, skipped_pairs=None,
                                fba_fee=(d or {}).get("fba_fee"))
                 if (it["ean"], market) not in skipped_pairs and gate_ranks[market] != GATE_HARD
                 else None)
-            verdicts[market] = market_verdict(d, roi, gate_ranks[market])
+            verdicts[market] = market_verdict(
+                d, roi, gate_ranks[market],
+                gate_label=(gating or {}).get(f"{market}_label"))
 
         if gating is not None and gating.get("note"):
             notes.append(f"Matrix: {gating['note']}")
@@ -1249,7 +1256,8 @@ def build_result_df(items, market_data, matrix, params, skipped_pairs=None,
 
         # one verdict per product: the best market wins, and says which
         order = [VERDICT_BUY, VERDICT_SOFT, VERDICT_POSSIBLE, VERDICT_LOW_ROI,
-                 VERDICT_PRICE_GAP, VERDICT_NO_DEMAND, VERDICT_DEAD, VERDICT_GATED]
+                 VERDICT_PRICE_GAP, VERDICT_NO_DEMAND, VERDICT_DEAD, VERDICT_GATED,
+                 VERDICT_NO_SELL]
         best = min(verdicts.items(), key=lambda kv: order.index(kv[1][0])) if verdicts else None
         if best:
             market, (verdict, units, why) = best
