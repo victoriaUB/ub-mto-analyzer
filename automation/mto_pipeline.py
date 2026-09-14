@@ -43,6 +43,7 @@ PROCESSED_LABEL = "mto-processed"
 DEFAULT_SENDER = "andreina@engelsa.com"
 DEFAULT_CHANNEL = "C01V52LDVFW"          # #fb_purchase_es
 MATRIX_PATH = os.path.join(os.path.dirname(__file__), "..", "brand_matrix.csv")
+OVERRIDES_PATH = os.path.join(os.path.dirname(__file__), "..", "brand_overrides.csv")
 SHIPPING_PATH = os.path.join(os.path.dirname(__file__), "..", "shipping_costs.csv")
 GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me"
 ATTACHMENT_EXTS = (".xlsx", ".xls", ".csv", ".eml")
@@ -160,7 +161,9 @@ def run_analysis(items, skipped=0, sheet_report=None):
         params.update({k: live[k] for k in ("eur_gbp", "eur_usd", "usd_cad", "eur_jpy")})
         rates_note = f"live ECB {live['date']}"
 
-    matrix_df = pd.read_csv(MATRIX_PATH, dtype=str).fillna("")
+    matrix_df, matrix_source = core.resolve_brand_matrix(
+        _shipping_creds(), MATRIX_PATH, OVERRIDES_PATH)
+    print(f"brand gating: {matrix_source}")
     res = core.analyze(items, os.environ["KEEPA_API_KEY"], params=params,
                        matrix_df=matrix_df, skip_hard_gated=True,
                        buybox=os.environ.get("KEEPA_BUYBOX", "1") == "1",
