@@ -584,6 +584,12 @@ def test_snapshot_fills_only_the_gaps_the_sheet_leaves():
     assert r["UK"] == "ok" and r["JP"] == "Hard Gated"   # ...but blank means "not recorded"
     assert len(out) == 2 and filled == 3                 # brands absent from the sheet survive
 
+
+def test_gated_verdict_distinguishes_our_choice_from_amazons():
+    assert core.market_verdict({}, 50, core.GATE_HARD)[0] == core.VERDICT_GATED
+    assert core.market_verdict({}, 50, core.GATE_HARD,
+                               gate_label=core.GATE_NO_SELL_LABEL)[0] == core.VERDICT_NO_SELL
+
 if __name__ == "__main__":
     failed = 0
     for name, fn in sorted(globals().items()):
