@@ -493,6 +493,97 @@ def test_cache_prune(tmp_path=None):
     assert "fresh" in kept and "stale" not in kept
 
 
+
+# ─── LIVE BRAND MATRIX ────────────────────────────────────────────────────────
+
+def _cell(text="", color=None):
+    c = {"formattedValue": text} if text else {}
+    if color:
+        c["effectiveFormat"] = {"backgroundColor": dict(zip(("red", "green", "blue"), color))}
+    return c
+
+
+GREEN, RED, ORANGE = (0.85, 0.92, 0.83), (0.96, 0.8, 0.8), (0.99, 0.9, 0.8)
+
+
+def test_brand_sheet_reads_colour_not_text():
+    rows = [{"values": [_cell(""), _cell("AMZ US"), _cell("AMZ CA"), _cell("AMZ UK"),
+                        _cell("AMZ AU"), _cell("AMZ JP")]},
+            {"values": [_cell("Balenciaga"), _cell("ok", GREEN), _cell("Hard Gated", RED),
+                        _cell("B00EXW39NQ / 3607", ORANGE), _cell("ok", GREEN), _cell()]}]
+    df = core.brand_rows_to_df(rows)
+    r = df.iloc[0]
+    # empty-but-orange is the real case: status from colour, ASIN kept as a note
+    assert r["UK"] == "has path to apply", r["UK"]
+    assert "B00EXW39NQ" in r["Notes"]
+    assert (r["US"], r["CA"], r["AU"], r["JP"]) == ("ok", "Hard Gated", "ok", "")
+
+
+def test_brand_sheet_colour_beats_contradicting_text():
+    rows = [{"values": [_cell(""), _cell("AMZ US")]},
+            {"values": [_cell("Lancome"), _cell("partially hard gated", ORANGE)]}]
+    df = core.brand_rows_to_df(rows)
+    assert df.iloc[0]["US"] == "has path to apply"
+
+
+def test_duplicate_brand_rows_merge_strictest():
+    df = pd.DataFrame([{"Brand": "Giorgio Armani", "US": "ok", "CA": "", "UK": "ok",
+                        "AU": "", "JP": "", "Notes": ""},
+                       {"Brand": "GIORGIO ARMANI", "US": "Hard Gated", "CA": "ok", "UK": "",
+                        "AU": "", "JP": "", "Notes": "fragrance only"}])
+    merged, conflicts = core.dedupe_brand_rows(df)
+    assert len(merged) == 1
+    r = merged.iloc[0]
+    assert r["US"] == "Hard Gated"      # never resolve a gating clash permissively
+    assert r["CA"] == "ok"              # blank carries no information
+    assert r["UK"] == "ok"
+    assert "fragrance only" in r["Notes"] and len(conflicts) == 1
+
+
+def test_override_hits_every_duplicate_row():
+    df = pd.DataFrame([{"Brand": "Paco Rabanne", "US": "ok", "CA": "ok", "UK": "", "AU": "",
+                        "JP": "", "Notes": ""},
+                       {"Brand": "paco rabanne", "US": "ok", "CA": "ok", "UK": "", "AU": "",
+                        "JP": "", "Notes": ""}])
+    ov = pd.DataFrame([{"Brand": "Paco Rabanne", "US": "do not sell", "CA": "do not sell",
+                        "UK": "", "AU": "", "JP": "", "Notes": "import complexities"}])
+    out = core.apply_brand_overrides(df, ov)
+    assert list(out["US"]) == ["do not sell", "do not sell"]
+    assert (out["CA"] == "do not sell").all()
+
+
+def test_do_not_sell_excludes_and_is_labelled_honestly():
+    m = core.matrix_from_df(pd.DataFrame([{"Brand": "Paco Rabanne", "US": "do not sell",
+                                           "CA": "do not sell", "UK": "do not sell",
+                                           "AU": "do not sell", "JP": "do not sell",
+                                           "Notes": "import complexities"}]))
+    e = m[core.norm_brand("Paco Rabanne")]
+    assert e["US"] == core.GATE_HARD                 # excluded as firmly as a gate
+    assert e["US_label"] == core.GATE_NO_SELL_LABEL  # but not called an Amazon gate
+
+
+def test_unknown_brand_override_is_added():
+    df = pd.DataFrame([{"Brand": "Dior", "US": "ok", "CA": "", "UK": "", "AU": "",
+                        "JP": "", "Notes": ""}])
+    ov = pd.DataFrame([{"Brand": "New Brand", "US": "do not sell", "CA": "", "UK": "",
+                        "AU": "", "JP": "", "Notes": "no import route"}])
+    out = core.apply_brand_overrides(df, ov)
+    assert len(out) == 2 and out.iloc[1]["US"] == "do not sell"
+
+
+def test_snapshot_fills_only_the_gaps_the_sheet_leaves():
+    live = pd.DataFrame([{"Brand": "Dior", "US": "Hard Gated", "CA": "ok", "UK": "",
+                          "AU": "", "JP": "", "Notes": ""}])
+    snap = pd.DataFrame([{"Brand": "dior", "US": "ok", "CA": "", "UK": "ok", "AU": "",
+                          "JP": "Hard Gated", "Notes": ""},
+                         {"Brand": "Nars", "US": "ok", "CA": "", "UK": "", "AU": "",
+                          "JP": "", "Notes": ""}])
+    out, filled = core.fill_matrix_gaps(live, snap)
+    r = out.iloc[0]
+    assert r["US"] == "Hard Gated"     # the sheet is the source of truth...
+    assert r["UK"] == "ok" and r["JP"] == "Hard Gated"   # ...but blank means "not recorded"
+    assert len(out) == 2 and filled == 3                 # brands absent from the sheet survive
+
 if __name__ == "__main__":
     failed = 0
     for name, fn in sorted(globals().items()):
