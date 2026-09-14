@@ -42,6 +42,21 @@ import core  # noqa: E402
 PROCESSED_LABEL = "mto-processed"
 DEFAULT_SENDER = "andreina@engelsa.com"
 DEFAULT_CHANNEL = "C01V52LDVFW"          # #fb_purchase_es
+
+# Tagged on every MTO post so purchasing and repricing both see it without
+# watching the channel. Override with MTO_MENTIONS="U123,U456" (empty = none).
+DEFAULT_MENTIONS = [
+    "U0795R217CJ",   # Anastasia Kozyreva
+    "U0550FKCXEX",   # Rita Kanash
+    "U05C2GHL7G8",   # Sonya
+    "U02GPSP0AAF",   # Victoria
+]
+
+
+def mention_line():
+    raw = os.environ.get("MTO_MENTIONS")
+    ids = [u.strip() for u in raw.split(",") if u.strip()] if raw is not None else DEFAULT_MENTIONS
+    return " ".join(f"<@{u}>" for u in ids)
 MATRIX_PATH = os.path.join(os.path.dirname(__file__), "..", "brand_matrix.csv")
 OVERRIDES_PATH = os.path.join(os.path.dirname(__file__), "..", "brand_overrides.csv")
 SHIPPING_PATH = os.path.join(os.path.dirname(__file__), "..", "shipping_costs.csv")
@@ -179,7 +194,11 @@ def run_analysis(items, skipped=0, sheet_report=None):
 def format_summary(subject, res):
     """The Slack body: status sentences per category, then the top rows."""
     df = res["result_df"]
-    lines = [f"*{subject}* — {len(df)} EANs analyzed"]
+    lines = []
+    mentions = mention_line()
+    if mentions:
+        lines.append(mentions)
+    lines.append(f"*{subject}* — {len(df)} EANs analyzed")
     lines += core.status_summary_lines(df)
     if res.get("skipped_rows"):
         lines.append(f"({res['skipped_rows']} row(s) skipped — missing/invalid EAN or price)")
