@@ -618,47 +618,143 @@ def sort_for_reading(df):
     return out.sort_values(["_o", "_r"], ascending=[True, False]).drop(columns=["_o", "_r"])
 
 
-def publish_to_sheet(creds_info, df, title, folder_id=RESULTS_FOLDER_ID):
-    """Create a Google Sheet of the results and return its URL. Raises if the
-    service account can't create files, so callers can fall back to a file
-    upload."""
-    import math
+MARKET_NAMES = {"CA": "CANADA", "UK": "UNITED KINGDOM", "US": "UNITED STATES", "JP": "JAPAN"}
+MARKET_CURRENCY = {"CA": ("CAD", "C$"), "UK": ("GBP", "£"), "US": ("USD", "$"), "JP": ("JPY", "¥")}
+
+# One tab per decision, each split by country — the girls read these market by
+# market, and a single wide table makes them scan 40 columns to find 4 numbers.
+def sheet_tab_specs():
+    # a function, not a constant: the verdict names are defined further down
+    return [("Buy candidates", (VERDICT_BUY,)),
+            ("Ungating required", (VERDICT_SOFT,)),
+            ("Possible opportunities", (VERDICT_POSSIBLE,))]
+
+SECTION_COLUMNS = ["Brand", "Product", "EAN", "Buy (EUR)", "Sell {sym}", "ROI %",
+                   "Breakeven {sym}", "Offers", "Rank drops 30d", "Est units/mo",
+                   "Gating", "ASIN", "Why"]
+
+
+def market_sections(df, verdicts):
+    """[(market, rows_df)] for the given per-market verdicts, most promising
+    country first — most candidates, then best ROI."""
+    out = []
+    for m in MARKETS:
+        col = f"Verdict {m}"
+        if col not in df.columns:
+            continue
+        sub = df[df[col].isin(verdicts)]
+        if sub.empty:
+            continue
+        sub = sub.sort_values(f"ROI {m}", ascending=False, na_position="last")
+        out.append((m, sub))
+    return sorted(out, key=lambda kv: (-len(kv[1]), -(kv[1][f"ROI {kv[0]}"].max() or 0)))
+
+
+def _section_rows(market, sub):
+    cur, sym = MARKET_CURRENCY[market]
+    header = [c.format(sym=sym) for c in SECTION_COLUMNS]
+    rows = [[f"{MARKET_NAMES[market]} — {len(sub)} product(s)"], header]
+    for _, r in sub.iterrows():
+        def g(col):
+            v = r.get(col)
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return ""
+            return round(v, 2) if isinstance(v, float) else v
+        rows.append([
+            g("Brand"), str(r.get("Product", ""))[:70], str(r.get("EAN", "")),
+            g("Purchase (EUR)"), g(f"Sell {market} ({cur})"), g(f"ROI {market}"),
+            g(f"Breakeven {market}"), g(f"Offers {market}"), g(f"Drops30 {market}"),
+            g(f"Units {market}"), g(f"Gating {market}"), g(f"ASIN {market}"),
+            str(r.get(f"Why {market}", ""))[:90],
+        ])
+    rows.append([])
+    return rows
+
+
+def build_sheet_tabs(df):
+    """{tab title: (rows, title_row_indices, header_row_indices)}"""
+    tabs = {}
+    for title, verdicts in sheet_tab_specs():
+        rows, titles, headers = [], [], []
+        for market, sub in market_sections(df, verdicts):
+            titles.append(len(rows))
+            headers.append(len(rows) + 1)
+            rows += _section_rows(market, sub)
+        if not rows:
+            rows = [["Nothing in this category for this offer."]]
+        tabs[title] = (rows, titles, headers)
+    return tabs
+
+
+def publish_to_sheet(creds_info, df, title, folder_id=RESULTS_FOLDER_ID,
+                     spreadsheet_id=None):
+    """Create (or rewrite) a Google Sheet with one tab per decision, split by
+    country. Returns its URL. Raises if the service account can't create files,
+    so callers can fall back to a file upload."""
     from google.oauth2 import service_account
     from googleapiclient.discovery import build
 
     creds = service_account.Credentials.from_service_account_info(
         dict(creds_info), scopes=["https://www.googleapis.com/auth/drive",
                                   "https://www.googleapis.com/auth/spreadsheets"])
-    drive = build("drive", "v3", credentials=creds, cache_discovery=False)
-    sid = drive.files().create(body={"name": title, "parents": [folder_id],
-                                     "mimeType": "application/vnd.google-apps.spreadsheet"},
-                               fields="id", supportsAllDrives=True).execute()["id"]
-
-    df = sort_for_reading(df)
-    for col in df.columns:
-        if pd.api.types.is_float_dtype(df[col]):
-            df[col] = df[col].round(2)
-    values = [list(df.columns)] + [
-        ["" if (isinstance(v, float) and math.isnan(v)) or v is None else v for v in row]
-        for row in df.itertuples(index=False, name=None)]
-
     svc = build("sheets", "v4", credentials=creds, cache_discovery=False)
-    svc.spreadsheets().values().update(
-        spreadsheetId=sid, range="A1", valueInputOption="RAW",
-        body={"values": values}).execute()
-    tab = svc.spreadsheets().get(spreadsheetId=sid, fields="sheets/properties").execute(
-        )["sheets"][0]["properties"]["sheetId"]
-    svc.spreadsheets().batchUpdate(spreadsheetId=sid, body={"requests": [
-        {"updateSheetProperties": {"properties": {"sheetId": tab, "gridProperties":
-            {"frozenRowCount": 1}}, "fields": "gridProperties.frozenRowCount"}},
-        {"repeatCell": {"range": {"sheetId": tab, "endRowIndex": 1}, "cell":
-            {"userEnteredFormat": {"textFormat": {"bold": True}}},
-            "fields": "userEnteredFormat.textFormat.bold"}},
-        {"setBasicFilter": {"filter": {"range": {"sheetId": tab}}}},
-        {"autoResizeDimensions": {"dimensions": {"sheetId": tab, "dimension": "COLUMNS",
-            "startIndex": 0, "endIndex": len(df.columns)}}},
-    ]}).execute()
-    return f"https://docs.google.com/spreadsheets/d/{sid}/edit"
+    if spreadsheet_id is None:
+        drive = build("drive", "v3", credentials=creds, cache_discovery=False)
+        spreadsheet_id = drive.files().create(
+            body={"name": title, "parents": [folder_id],
+                  "mimeType": "application/vnd.google-apps.spreadsheet"},
+            fields="id", supportsAllDrives=True).execute()["id"]
+
+    tabs = build_sheet_tabs(df)
+    def tab_ids():
+        return {s["properties"]["title"]: s["properties"]["sheetId"]
+                for s in svc.spreadsheets().get(
+                    spreadsheetId=spreadsheet_id,
+                    fields="sheets/properties").execute()["sheets"]}
+
+    existing = tab_ids()
+
+    # add missing tabs first so we can drop whatever the file had before
+    adds = [{"addSheet": {"properties": {"title": t}}} for t in tabs if t not in existing]
+    if adds:
+        svc.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id,
+                                       body={"requests": adds}).execute()
+        existing = tab_ids()
+    drops = [{"deleteSheet": {"sheetId": sid}} for t, sid in existing.items() if t not in tabs]
+
+    data = [{"range": f"'{t}'!A1", "values": rows} for t, (rows, _, _) in tabs.items()]
+    svc.spreadsheets().values().batchClear(
+        spreadsheetId=spreadsheet_id,
+        body={"ranges": [f"'{t}'" for t in tabs]}).execute()
+    svc.spreadsheets().values().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={"valueInputOption": "RAW", "data": data}).execute()
+
+    reqs = list(drops)
+    for t, (rows, titles, headers) in tabs.items():
+        sid = existing[t]
+        width = max((len(r) for r in rows), default=1)
+        for i in titles:
+            reqs.append({"repeatCell": {
+                "range": {"sheetId": sid, "startRowIndex": i, "endRowIndex": i + 1},
+                "cell": {"userEnteredFormat": {
+                    "backgroundColor": {"red": 0.17, "green": 0.24, "blue": 0.31},
+                    "textFormat": {"bold": True, "fontSize": 11,
+                                   "foregroundColor": {"red": 1, "green": 1, "blue": 1}}}},
+                "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
+        for i in headers:
+            reqs.append({"repeatCell": {
+                "range": {"sheetId": sid, "startRowIndex": i, "endRowIndex": i + 1},
+                "cell": {"userEnteredFormat": {
+                    "backgroundColor": {"red": 0.91, "green": 0.94, "blue": 0.96},
+                    "textFormat": {"bold": True}}},
+                "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
+        reqs.append({"autoResizeDimensions": {"dimensions": {
+            "sheetId": sid, "dimension": "COLUMNS", "startIndex": 0, "endIndex": width}}})
+    if reqs:
+        svc.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id,
+                                       body={"requests": reqs}).execute()
+    return f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
 
 
 # ─── KEEPA CLIENT ─────────────────────────────────────────────────────────────
@@ -1194,7 +1290,8 @@ RESULT_COLUMNS = (["Product", "Brand", "EAN", "Purchase (EUR)", "Status",
                    "Verdict", "Why", "Est units/mo"]
                   + [f"{field} {m}" for m in MARKETS
                      for field in ("ASIN", "Sell", "Breakeven", "ROI", "Gating",
-                                   "Offers", "BB days", "Drops30")]
+                                   "Offers", "BB days", "Drops30", "Verdict",
+                                   "Why", "Units")]
                   + ["Notes"])
 
 
@@ -1310,6 +1407,11 @@ def build_result_df(items, market_data, matrix, params, skipped_pairs=None,
             verdicts[market] = market_verdict(
                 d, roi, gate_ranks[market],
                 gate_label=(gating or {}).get(f"{market}_label"))
+            # kept per market so results can be split by country downstream
+            row[f"Verdict {market}"] = verdicts[market][0]
+            row[f"Why {market}"] = verdicts[market][2]
+            row[f"Units {market}"] = (round(verdicts[market][1], 1)
+                                      if verdicts[market][1] else None)
 
         if gating is not None and gating.get("note"):
             notes.append(f"Matrix: {gating['note']}")
