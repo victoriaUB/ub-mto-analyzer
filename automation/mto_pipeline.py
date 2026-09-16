@@ -263,6 +263,25 @@ def slack_upload_xlsx(channel, df, filename, thread_ts=None):
     })
 
 
+def publish_results(channel, df, subject, msg_id, thread_ts):
+    """A Google Sheet is what people actually open, so try that first and fall
+    back to attaching the workbook."""
+    creds = _shipping_creds()
+    if creds:
+        try:
+            url = core.publish_to_sheet(creds, df, f"MTO — {subject[:60]}")
+            slack_post(channel, "Full table — all EANs, all markets, sorted so "
+                                f"decisions come first:\n\n{url}", thread_ts=thread_ts)
+            return
+        except Exception as e:
+            print(f"  sheet publish failed, attaching xlsx instead: {e}")
+    try:
+        slack_upload_xlsx(channel, df, f"mto_analysis_{msg_id[:8]}.xlsx",
+                          thread_ts=thread_ts)
+    except Exception as e:
+        slack_post(channel, f"(couldn't attach the Excel: {e})", thread_ts=thread_ts)
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def process_message(token, msg_id, channel, label_id):
@@ -284,12 +303,7 @@ def process_message(token, msg_id, channel, label_id):
                                 f"*{subject}*: {e}\nCheck the file manually.")
             continue
         msg = slack_post(channel, format_summary(subject, res))
-        out_name = f"mto_analysis_{msg_id[:8]}.xlsx"
-        try:
-            slack_upload_xlsx(channel, res["result_df"], out_name,
-                              thread_ts=msg.get("ts"))
-        except Exception as e:
-            slack_post(channel, f"(couldn't attach the Excel: {e})", thread_ts=msg.get("ts"))
+        publish_results(channel, res["result_df"], subject, msg_id, msg.get("ts"))
     mark_processed(token, msg_id, label_id)
 
 
