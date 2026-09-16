@@ -599,6 +599,68 @@ def load_shipping_table(path):
     return table
 
 
+# ─── PUBLISHING RESULTS ───────────────────────────────────────────────────────
+# Shared Drive folder for MTO analyses. The service account needs Editor on it
+# (it has that) *and* the Drive API enabled in the mto-analyzer Cloud project
+# (creating the file needs Drive; filling it only needs Sheets).
+RESULTS_FOLDER_ID = "1sXcJoxOkgqfJh-8BOP59xBJwpDwHwWqL"
+
+VERDICT_SORT = {"🟢": 0, "🟠": 1, "🔵": 2, "🔴": 3, "⚪": 4, "⚫": 5, "🚫": 6}
+
+
+def sort_for_reading(df):
+    """Decisions first, then best ROI — the order someone opening the sheet
+    wants, not the order the EANs arrived in."""
+    out = df.copy()
+    out["_o"] = out["Verdict"].fillna("").str[0].map(VERDICT_SORT).fillna(9)
+    roi_cols = [f"ROI {m}" for m in MARKETS if f"ROI {m}" in out.columns]
+    out["_r"] = out[roi_cols].max(axis=1) if roi_cols else 0
+    return out.sort_values(["_o", "_r"], ascending=[True, False]).drop(columns=["_o", "_r"])
+
+
+def publish_to_sheet(creds_info, df, title, folder_id=RESULTS_FOLDER_ID):
+    """Create a Google Sheet of the results and return its URL. Raises if the
+    service account can't create files, so callers can fall back to a file
+    upload."""
+    import math
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+
+    creds = service_account.Credentials.from_service_account_info(
+        dict(creds_info), scopes=["https://www.googleapis.com/auth/drive",
+                                  "https://www.googleapis.com/auth/spreadsheets"])
+    drive = build("drive", "v3", credentials=creds, cache_discovery=False)
+    sid = drive.files().create(body={"name": title, "parents": [folder_id],
+                                     "mimeType": "application/vnd.google-apps.spreadsheet"},
+                               fields="id", supportsAllDrives=True).execute()["id"]
+
+    df = sort_for_reading(df)
+    for col in df.columns:
+        if pd.api.types.is_float_dtype(df[col]):
+            df[col] = df[col].round(2)
+    values = [list(df.columns)] + [
+        ["" if (isinstance(v, float) and math.isnan(v)) or v is None else v for v in row]
+        for row in df.itertuples(index=False, name=None)]
+
+    svc = build("sheets", "v4", credentials=creds, cache_discovery=False)
+    svc.spreadsheets().values().update(
+        spreadsheetId=sid, range="A1", valueInputOption="RAW",
+        body={"values": values}).execute()
+    tab = svc.spreadsheets().get(spreadsheetId=sid, fields="sheets/properties").execute(
+        )["sheets"][0]["properties"]["sheetId"]
+    svc.spreadsheets().batchUpdate(spreadsheetId=sid, body={"requests": [
+        {"updateSheetProperties": {"properties": {"sheetId": tab, "gridProperties":
+            {"frozenRowCount": 1}}, "fields": "gridProperties.frozenRowCount"}},
+        {"repeatCell": {"range": {"sheetId": tab, "endRowIndex": 1}, "cell":
+            {"userEnteredFormat": {"textFormat": {"bold": True}}},
+            "fields": "userEnteredFormat.textFormat.bold"}},
+        {"setBasicFilter": {"filter": {"range": {"sheetId": tab}}}},
+        {"autoResizeDimensions": {"dimensions": {"sheetId": tab, "dimension": "COLUMNS",
+            "startIndex": 0, "endIndex": len(df.columns)}}},
+    ]}).execute()
+    return f"https://docs.google.com/spreadsheets/d/{sid}/edit"
+
+
 # ─── KEEPA CLIENT ─────────────────────────────────────────────────────────────
 
 IDX_SALES_RANK = 3      # stats array index: sales rank
