@@ -269,9 +269,12 @@ def publish_results(channel, df, subject, msg_id, thread_ts):
     creds = _shipping_creds()
     if creds:
         try:
-            url = core.publish_to_sheet(creds, df, f"MTO — {subject[:60]}")
-            slack_post(channel, "Full table — all EANs, all markets, sorted so "
-                                f"decisions come first:\n\n{url}", thread_ts=thread_ts)
+            # master workbook, not a new file: creating files needs the Drive
+            # API plus a fresh share every time, and nobody should have to do
+            # that per offer
+            url = core.publish_to_master(creds, df, subject)
+            slack_post(channel, "Full table — one tab per decision, split by "
+                                f"country:\n\n{url}", thread_ts=thread_ts)
             return
         except Exception as e:
             print(f"  sheet publish failed, attaching xlsx instead: {e}")
