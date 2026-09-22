@@ -315,6 +315,9 @@ def main():
     parser.add_argument("--dry-run", metavar="FILE",
                         help="Analyze a local offer file and print the Slack "
                              "message instead of touching Gmail/Slack")
+    parser.add_argument("--publish", action="store_true",
+                        help="With --dry-run, also write the tabs to the master "
+                             "workbook — exercises the real publishing path")
     args = parser.parse_args()
 
     if args.dry_run:
@@ -326,6 +329,10 @@ def main():
         out = os.path.splitext(args.dry_run)[0] + "_analysis.xlsx"
         res["result_df"].to_excel(out, index=False, engine="openpyxl")
         print(f"\nFull table written to {out}")
+        if args.publish:
+            creds = _shipping_creds()
+            print("sheet: " + core.publish_to_master(
+                creds, res["result_df"], os.path.basename(args.dry_run)))
         return
 
     sender = os.environ.get("MTO_SENDER", DEFAULT_SENDER)
