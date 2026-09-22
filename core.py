@@ -677,11 +677,12 @@ NO_LISTING_COLUMNS = ["Brand", "Product", "EAN", "Buy (EUR)", "No listing on", "
 def _no_listing_rows(df):
     """Products nobody is selling anywhere we looked — the listings team's
     queue, not a buying decision, so it is a flat list rather than per market."""
-    cols = [f"Verdict {m}" for m in MARKETS if f"Verdict {m}" in df.columns]
-    if not cols:
+    if "Status" not in df.columns:
         return []
-    dead = df[df[cols].isin([VERDICT_DEAD]).any(axis=1)
-              & ~df["Verdict"].fillna("").str.startswith(("🟢", "🟠", "🔵"))]
+    # the same definition the status lines use: no listing on ANY target
+    # market. A product listed on three markets and missing on one is not a
+    # listings job.
+    dead = df[df["Status"] == PSTATUS_NEW]
     if dead.empty:
         return []
     rows = [[f"NO LISTING — {len(dead)} product(s), worth creating?"], NO_LISTING_COLUMNS]
@@ -704,13 +705,14 @@ def build_sheet_tabs(df):
             titles.append(len(rows))
             headers.append(len(rows) + 1)
             rows += _section_rows(market, sub)
-        if not rows:
-            rows = [["Nothing in this category for this offer."]]
-        tabs[title] = (rows, titles, headers)
+        # an empty tab is noise: if this offer has no buy candidates, don't
+        # make someone open a tab to find that out
+        if rows:
+            tabs[title] = (rows, titles, headers)
 
     dead = _no_listing_rows(df)
-    tabs["No listing"] = ((dead or [["Every product has a listing somewhere."]]),
-                          [0] if dead else [], [1] if dead else [])
+    if dead:
+        tabs["No listing"] = (dead, [0], [1])
 
     # everything, for anyone who wants to check a product we filtered out
     full = sort_for_reading(df)
@@ -775,6 +777,12 @@ def publish_to_master(creds_info, df, offer, master_id=MASTER_SHEET_ID,
     for t, (rows, titles, headers) in tabs.items():
         sid = existing[t]
         reqs += _format_requests(sid, rows, titles, headers)
+
+    # a re-run with fewer categories must drop the tabs it no longer produces,
+    # otherwise yesterday's empty "Buy candidates" lingers as a false negative
+    prefix = _tab_name(offer, "")
+    reqs += [{"deleteSheet": {"sheetId": sid}} for t, sid in existing.items()
+             if t.startswith(prefix) and t not in tabs]
 
     # prune the oldest offers — tabs are ordered newest-first
     groups, seen = [], set()
