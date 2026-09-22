@@ -724,6 +724,98 @@ def build_sheet_tabs(df):
     return tabs
 
 
+# One workbook the service account already has Editor on. Creating a NEW file
+# needs the Drive API enabled *and* a fresh share, so results go here as a tab
+# group per offer instead — no setup, no manual step, ever.
+MASTER_SHEET_ID = "1W18tFrZGcYAFVPMuSwF7uYbQKIYwTC8RYt1GycajmTU"
+KEEP_OFFERS = 6           # prune the oldest tab groups so tabs don't pile up
+
+
+def _tab_name(offer, part):
+    """'VICTORIA'S SECRET · Buy candidates', clipped to Sheets' 100-char limit."""
+    offer = " ".join(str(offer).split())[:45]
+    return f"{offer} · {part}"
+
+
+def publish_to_master(creds_info, df, offer, master_id=MASTER_SHEET_ID,
+                      keep_offers=KEEP_OFFERS):
+    """Add this offer's tabs to the master workbook and return a link to its
+    first tab. Needs no Drive API and no new sharing."""
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+
+    creds = service_account.Credentials.from_service_account_info(
+        dict(creds_info), scopes=["https://www.googleapis.com/auth/spreadsheets"])
+    svc = build("sheets", "v4", credentials=creds, cache_discovery=False)
+
+    def props():
+        return [s["properties"] for s in svc.spreadsheets().get(
+            spreadsheetId=master_id, fields="sheets/properties").execute()["sheets"]]
+
+    tabs = {_tab_name(offer, part): payload
+            for part, payload in build_sheet_tabs(df).items()}
+    existing = {p["title"]: p["sheetId"] for p in props()}
+
+    reqs = [{"addSheet": {"properties": {"title": t, "index": i}}}
+            for i, t in enumerate(tabs) if t not in existing]
+    if reqs:
+        svc.spreadsheets().batchUpdate(spreadsheetId=master_id,
+                                       body={"requests": reqs}).execute()
+        existing = {p["title"]: p["sheetId"] for p in props()}
+
+    svc.spreadsheets().values().batchClear(
+        spreadsheetId=master_id, body={"ranges": [f"'{t}'" for t in tabs]}).execute()
+    svc.spreadsheets().values().batchUpdate(
+        spreadsheetId=master_id,
+        body={"valueInputOption": "RAW",
+              "data": [{"range": f"'{t}'!A1", "values": rows}
+                       for t, (rows, _, _) in tabs.items()]}).execute()
+
+    reqs = []
+    for t, (rows, titles, headers) in tabs.items():
+        sid = existing[t]
+        reqs += _format_requests(sid, rows, titles, headers)
+
+    # prune the oldest offers — tabs are ordered newest-first
+    groups, seen = [], set()
+    for p in props():
+        grp = p["title"].split(" · ")[0]
+        if grp not in seen:
+            seen.add(grp)
+            groups.append(grp)
+    for stale in groups[keep_offers:]:
+        reqs += [{"deleteSheet": {"sheetId": p["sheetId"]}} for p in props()
+                 if p["title"].startswith(f"{stale} · ")]
+    if reqs:
+        svc.spreadsheets().batchUpdate(spreadsheetId=master_id,
+                                       body={"requests": reqs}).execute()
+    first = existing[next(iter(tabs))]
+    return f"https://docs.google.com/spreadsheets/d/{master_id}/edit#gid={first}"
+
+
+def _format_requests(sid, rows, titles, headers):
+    width = max((len(r) for r in rows), default=1)
+    out = []
+    for i in titles:
+        out.append({"repeatCell": {
+            "range": {"sheetId": sid, "startRowIndex": i, "endRowIndex": i + 1},
+            "cell": {"userEnteredFormat": {
+                "backgroundColor": {"red": 0.17, "green": 0.24, "blue": 0.31},
+                "textFormat": {"bold": True, "fontSize": 11,
+                               "foregroundColor": {"red": 1, "green": 1, "blue": 1}}}},
+            "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
+    for i in headers:
+        out.append({"repeatCell": {
+            "range": {"sheetId": sid, "startRowIndex": i, "endRowIndex": i + 1},
+            "cell": {"userEnteredFormat": {
+                "backgroundColor": {"red": 0.91, "green": 0.94, "blue": 0.96},
+                "textFormat": {"bold": True}}},
+            "fields": "userEnteredFormat(backgroundColor,textFormat)"}})
+    out.append({"autoResizeDimensions": {"dimensions": {
+        "sheetId": sid, "dimension": "COLUMNS", "startIndex": 0, "endIndex": width}}})
+    return out
+
+
 def publish_to_sheet(creds_info, df, title, folder_id=RESULTS_FOLDER_ID,
                      spreadsheet_id=None):
     """Create (or rewrite) a Google Sheet with one tab per decision, split by
