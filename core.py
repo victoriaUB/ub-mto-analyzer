@@ -671,6 +671,30 @@ def _section_rows(market, sub):
     return rows
 
 
+NO_LISTING_COLUMNS = ["Brand", "Product", "EAN", "Buy (EUR)", "No listing on", "Notes"]
+
+
+def _no_listing_rows(df):
+    """Products nobody is selling anywhere we looked — the listings team's
+    queue, not a buying decision, so it is a flat list rather than per market."""
+    cols = [f"Verdict {m}" for m in MARKETS if f"Verdict {m}" in df.columns]
+    if not cols:
+        return []
+    dead = df[df[cols].isin([VERDICT_DEAD]).any(axis=1)
+              & ~df["Verdict"].fillna("").str.startswith(("🟢", "🟠", "🔵"))]
+    if dead.empty:
+        return []
+    rows = [[f"NO LISTING — {len(dead)} product(s), worth creating?"], NO_LISTING_COLUMNS]
+    for _, r in dead.iterrows():
+        missing = [m for m in MARKETS
+                   if str(r.get(f"Verdict {m}", "")) == VERDICT_DEAD]
+        rows.append([r.get("Brand", ""), str(r.get("Product", ""))[:70],
+                     str(r.get("EAN", "")),
+                     round(r["Purchase (EUR)"], 2) if pd.notna(r.get("Purchase (EUR)")) else "",
+                     ", ".join(missing), str(r.get("Notes", ""))[:90]])
+    return rows
+
+
 def build_sheet_tabs(df):
     """{tab title: (rows, title_row_indices, header_row_indices)}"""
     tabs = {}
@@ -683,6 +707,20 @@ def build_sheet_tabs(df):
         if not rows:
             rows = [["Nothing in this category for this offer."]]
         tabs[title] = (rows, titles, headers)
+
+    dead = _no_listing_rows(df)
+    tabs["No listing"] = ((dead or [["Every product has a listing somewhere."]]),
+                          [0] if dead else [], [1] if dead else [])
+
+    # everything, for anyone who wants to check a product we filtered out
+    full = sort_for_reading(df)
+    for col in full.columns:
+        if pd.api.types.is_float_dtype(full[col]):
+            full[col] = full[col].round(2)
+    rows = [list(full.columns)] + [
+        ["" if v is None or (isinstance(v, float) and pd.isna(v)) else v for v in row]
+        for row in full.itertuples(index=False, name=None)]
+    tabs["All products"] = (rows, [], [0])
     return tabs
 
 
