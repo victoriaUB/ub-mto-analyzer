@@ -730,7 +730,8 @@ def build_sheet_tabs(df):
 # needs the Drive API enabled *and* a fresh share, so results go here as a tab
 # group per offer instead — no setup, no manual step, ever.
 MASTER_SHEET_ID = "1W18tFrZGcYAFVPMuSwF7uYbQKIYwTC8RYt1GycajmTU"
-KEEP_OFFERS = 6           # prune the oldest tab groups so tabs don't pile up
+KEEP_OFFERS = 24          # ~3 weekly batches; Sheets allows ~200 tabs, so the
+                          # binding limit is 10M cells, not this
 
 
 def _tab_name(offer, part):
