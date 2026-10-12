@@ -38,7 +38,8 @@ DEFAULT_PARAMS = {
     "jp_ref": 10.4, "jp_dsf": 2.5, "jp_vat": 10.0,
 }
 
-RATES_URL = "https://api.frankfurter.app/latest?from=EUR&to=GBP,USD,CAD,JPY"
+# frankfurter.app now 301-redirects here; call the new host directly.
+RATES_URL = "https://api.frankfurter.dev/v1/latest?base=EUR&symbols=GBP,USD,CAD,JPY"
 
 
 def fetch_live_rates(timeout=8):
