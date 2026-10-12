@@ -80,13 +80,21 @@ RATE_KEYS = ("eur_gbp", "eur_usd", "usd_cad", "eur_jpy")
 def _fetch_rates_cached(shape):
     """`shape` is part of the cache key: when the set of rates we need changes,
     previously cached results (which lack the new keys) are discarded instead of
-    being served with a missing key."""
-    return core.fetch_live_rates()
+    being served with a missing key.
+    Raises on failure: st.cache_data does not cache exceptions, so a failed
+    fetch is retried next rerun instead of pinning the fallback for an hour."""
+    live = core.fetch_live_rates()
+    if not live:
+        raise RuntimeError("live rates unavailable")
+    return live
 
 
 def cached_live_rates():
-    live = _fetch_rates_cached(",".join(RATE_KEYS))
-    if not live or any(k not in live for k in RATE_KEYS):
+    try:
+        live = _fetch_rates_cached(",".join(RATE_KEYS))
+    except RuntimeError:
+        return None
+    if any(k not in live for k in RATE_KEYS):
         return None          # unusable payload — fall back to manual values
     return live
 
