@@ -903,6 +903,8 @@ IDX_SALES_RANK = 3      # stats array index: sales rank
 IDX_BB_OOS = 18         # out-of-stock array index: Buy Box (100 = no Buy Box at all)
 IDX_NEW = 1             # stats array index: NEW price
 IDX_BUY_BOX = 18        # stats array index: buy box incl. shipping
+IDX_COUNT_NEW = 11      # stats array index: number of NEW offers (≈ sellers)
+IDX_AMAZON = 0          # stats array index: Amazon's own offer price (-1 = none)
 BATCH_SIZE = 100
 CACHE_MAX_AGE_S = 7 * 86400   # prune cache entries older than a week
 
@@ -941,6 +943,14 @@ def stat_rank(stats, arr_name, idx):
     return None
 
 
+def _stat_count(stats, arr_name, idx):
+    """A count series from a stats array (offer counts); -1 / missing → None."""
+    arr = (stats or {}).get(arr_name) or []
+    if idx < len(arr) and isinstance(arr[idx], (int, float)) and arr[idx] >= 0:
+        return arr[idx]
+    return None
+
+
 def _oos_to_bb_days(stats, key="outOfStockPercentage30"):
     """% of the last 30 days that had a Buy Box. Keepa reports out-of-stock
     percentage per price type; -1 means no data."""
@@ -976,6 +986,11 @@ def extract_product(p, price_divisor=100):
         "bb_is_fba": stats.get("buyBoxIsFBA"),
         "bb_is_amazon": stats.get("buyBoxIsAmazon"),
         "bb_days_30": _oos_to_bb_days(stats),         # % of last 30d with a Buy Box
+        # seller count now vs. before — the gating tell (see seller_gate_signal)
+        "sellers_now": _stat_count(stats, "current", IDX_COUNT_NEW),
+        "sellers_avg90": _stat_count(stats, "avg90", IDX_COUNT_NEW),
+        "sellers_avg180": _stat_count(stats, "avg180", IDX_COUNT_NEW),
+        "amazon_now": (_stat_count(stats, "current", IDX_AMAZON) or 0) > 0,
         # --- demand ------------------------------------------------------
         "rank_drops_30": stat_num("salesRankDrops30"),
         "rank_drops_90": stat_num("salesRankDrops90"),
@@ -1049,7 +1064,7 @@ def fetch_market(key, market, eans, cache, cache_hours, progress=None, cache_pat
     now = time.time()
     results, missing = {}, []
     for ean in eans:
-        entry = cache.get(f"v4{'b' if buybox else ''}:{domain}:{ean}")
+        entry = cache.get(f"v5{'b' if buybox else ''}:{domain}:{ean}")
         if entry and cache_hours > 0 and now - entry["ts"] < cache_hours * 3600:
             results[ean] = entry["data"]
         else:
@@ -1074,7 +1089,7 @@ def fetch_market(key, market, eans, cache, cache_hours, progress=None, cache_pat
                 best = matches[0]
                 best["n_matches"] = len(matches)
                 results[ean] = best
-            cache[f"v4{'b' if buybox else ''}:{domain}:{ean}"] = {"ts": now, "data": results[ean]}
+            cache[f"v5{'b' if buybox else ''}:{domain}:{ean}"] = {"ts": now, "data": results[ean]}
         save_cache(cache, cache_path)
 
     return results, tokens_left
@@ -1213,6 +1228,45 @@ VERDICT_DEAD = "⚫ nobody selling"
 VERDICT_LOW_ROI = "⚪ below ROI bar"
 VERDICT_GATED = "🚫 gated"
 VERDICT_NO_SELL = "🚫 we do not sell this brand"
+VERDICT_LIKELY_GATED = "🚫 likely gated — sellers dropped to one"
+
+# ─── GATING FROM THE SELLER COUNT (Victoria, Oct 2026) ────────────────────────
+# The brand sheet only knows the brands someone has checked. Keepa's seller
+# count fills the gap per listing:
+#   • several sellers selling it NOW → the listing is not hard gated there.
+#   • several sellers before, exactly ONE now → most probably gated (the brand
+#     or the ASIN got restricted and everyone but the authorised seller left).
+# Zero sellers is "nobody selling", not gating — that is handled elsewhere.
+SEVERAL_SELLERS = 2        # sellers now at or above this = not hard gated
+COLLAPSE_FROM = 2.0        # 90/180-day average at or above this, now 1 = collapse
+
+GATE_OPEN_LABEL = "👥 Not hard gated — {n} sellers now (soft gating unknown)"
+GATE_LIKELY_LABEL = "🔒 Likely gated — ~{was:.0f} sellers before, 1 now"
+AMAZON_ONLY_NOTE = ("only Amazon sells it now (~{was:.0f} sellers before) — "
+                    "not necessarily gated, check")
+
+# When the one seller left is Amazon itself, Amazon retail may simply have
+# pushed the others out — that is not gating, so it stays a note.
+SIGNAL_OPEN, SIGNAL_COLLAPSED, SIGNAL_AMAZON_ONLY = "open", "collapsed", "amazon_only"
+
+
+def seller_gate_signal(d):
+    """(signal, detail) from a Keepa record's seller counts, or (None, None).
+    detail is the seller count now (open) or the past average (collapsed)."""
+    if not d:
+        return None, None
+    now = d.get("sellers_now")
+    if now is None:
+        return None, None
+    if now >= SEVERAL_SELLERS:
+        return SIGNAL_OPEN, int(now)
+    past = max((v for v in (d.get("sellers_avg90"), d.get("sellers_avg180"))
+                if v is not None), default=None)
+    if now == 1 and past is not None and past >= COLLAPSE_FROM:
+        if d.get("amazon_now") or d.get("bb_is_amazon"):
+            return SIGNAL_AMAZON_ONLY, past
+        return SIGNAL_COLLAPSED, past
+    return None, None
 
 
 def breakeven_sell(market, p_eur, P, is_dg=True, roi_target=None, fba_fee=None):
@@ -1251,6 +1305,8 @@ def market_verdict(d, roi, gate_rank, roi_threshold=ROI_THRESHOLD, gate_label=No
         # only one of them is worth appealing — say which.
         if gate_label == GATE_NO_SELL_LABEL:
             return VERDICT_NO_SELL, None, ""
+        if gate_label and gate_label.startswith("🔒"):
+            return VERDICT_LIKELY_GATED, None, gate_label
         return VERDICT_GATED, None, ""
     if not d:
         return VERDICT_DEAD, None, "no listing found"
@@ -1308,6 +1364,7 @@ def market_verdict(d, roi, gate_rank, roi_threshold=ROI_THRESHOLD, gate_label=No
 PSTATUS_EXISTING = "🟢 opportunity"
 PSTATUS_UNGATING = "🟠 soft-gated, good ROI"
 PSTATUS_CHECKGATE = "🔵 ROI ok — gating unknown"
+PSTATUS_OPEN = "🔵 ROI ok — several sellers, not hard gated"
 PSTATUS_NEW = "🆕 no listing"
 PSTATUS_LOW = "⚪ below threshold"
 PSTATUS_HARD = "🚫 hard gated"
@@ -1324,6 +1381,7 @@ STATUS_HEADLINES = {}   # filled after the per-product labels are defined
 STATUS_SENTENCES = [
     (PSTATUS_EXISTING, "{n} EANs for ungated brands with ROI above {t:.0f}%"),
     (PSTATUS_UNGATING, "{n} EANs for soft-gated brands with ROI above {t:.0f}% — ungating required"),
+    (PSTATUS_OPEN,     "{n} EANs with ROI above {t:.0f}% sold by several sellers — not hard gated, soft gating to be checked"),
     (PSTATUS_CHECKGATE, "{n} EANs with ROI above {t:.0f}% for brands missing from the gating matrix, gating status to be checked"),
     (PSTATUS_NEW,      "{n} EANs with no listings on target markets, check if worth creating"),
     (PSTATUS_LOW,      "{n} EANs listed but with ROI below {t:.0f}%"),
@@ -1333,7 +1391,7 @@ STATUS_SENTENCES = [
 STATUS_CHECKGATE = "🔵 Opportunities found — gating status to be checked"
 STATUS_HEADLINES.update({
     PSTATUS_EXISTING: STATUS_EXISTING, PSTATUS_UNGATING: STATUS_UNGATING,
-    PSTATUS_CHECKGATE: STATUS_CHECKGATE,
+    PSTATUS_CHECKGATE: STATUS_CHECKGATE, PSTATUS_OPEN: STATUS_CHECKGATE,
     PSTATUS_NEW: STATUS_NEW_LAUNCH, PSTATUS_LOW: STATUS_NO_OPP,
     PSTATUS_HARD: STATUS_HARD,
 })
@@ -1349,7 +1407,8 @@ def product_status(row, roi_threshold=ROI_THRESHOLD):
     best = None
     for m in MARKETS:
         gate = row.get(f"Gating {m}")
-        if gate != hard_label:
+        gate_hard = gate == hard_label or str(gate).startswith("🔒")
+        if not gate_hard:
             all_hard = False
         asin = row.get(f"ASIN {m}")
         if asin is not None and pd.notna(asin):
@@ -1361,7 +1420,11 @@ def product_status(row, roi_threshold=ROI_THRESHOLD):
             return PSTATUS_EXISTING
         if gate == apply_label:
             best = best or PSTATUS_UNGATING
-        elif gate != hard_label:
+        elif str(gate).startswith("👥"):
+            # several sellers on it now: not hard gated, soft gating unknown
+            if best in (None, PSTATUS_CHECKGATE):
+                best = PSTATUS_OPEN
+        elif not gate_hard:
             # ROI clears the bar but we don't know if we may sell the brand
             best = best or PSTATUS_CHECKGATE
     if best:
@@ -1435,6 +1498,27 @@ RESULT_COLUMNS = (["Product", "Brand", "EAN", "Purchase (EUR)", "Status",
                   + ["Notes"])
 
 
+BRAND_IN_TITLES_SHARE = 0.3   # of an offer's listed products
+
+
+def offer_brands_named_in_titles(items, market_data):
+    """Offer-line brands that are real brands: Amazon titles name them for a
+    fair share of the products carrying them. A multi-brand offer labelled with
+    its own name ('PERFUMES & SKINCARE') never qualifies; a single-brand offer
+    does even when some listings omit the brand from the title."""
+    seen, named = {}, {}
+    for it in items:
+        b = norm_brand(it.get("brand") or "")
+        titles = [d.get("title") or "" for d in
+                  (market_data.get(m, {}).get(it["ean"]) for m in MARKETS) if d]
+        if not b or not titles:
+            continue
+        seen[b] = seen.get(b, 0) + 1
+        if any(b in norm_brand(t) for t in titles):
+            named[b] = named.get(b, 0) + 1
+    return {b for b, n in seen.items() if named.get(b, 0) / n >= BRAND_IN_TITLES_SHARE}
+
+
 def build_result_df(items, market_data, matrix, params, skipped_pairs=None,
                     shipping_table=None, customs_table=None):
     """Assemble + rank the result table. Pure function of its inputs, so the UI
@@ -1443,6 +1527,7 @@ def build_result_df(items, market_data, matrix, params, skipped_pairs=None,
     shipping_table = shipping_table or {}
     customs_table = customs_table or {}
     P = {**DEFAULT_PARAMS, **(params or {})}
+    real_brands = offer_brands_named_in_titles(items, market_data)
     rows = []
     for it in items:
         row = {"Product": it["title"], "EAN": it["ean"],
@@ -1462,21 +1547,43 @@ def build_result_df(items, market_data, matrix, params, skipped_pairs=None,
             if d and d.get("brand"):
                 keepa_brand = d["brand"]
                 break
-        if keepa_brand and (not brand or gating_for_brand(matrix, brand) is None):
+        # ...unless the Keepa title itself names the offer's brand: Amazon's
+        # brand field is sometimes a product line or plain wrong (Byphasse
+        # listings filed under "URBAN SWING"), and the title is the better word.
+        if keepa_brand and (not brand or (gating_for_brand(matrix, brand) is None
+                                          and norm_brand(brand) not in real_brands)):
             brand = keepa_brand
         row["Brand"] = brand
         gating = gating_for_brand(matrix, brand)
         if gating is not None and brand and norm_brand(brand) != norm_brand(gating["display"]):
             notes.append(f"Gating matched matrix brand '{gating['display']}' — verify")
-        gate_ranks = {}
+        gate_ranks, gate_labels, amazon_only = {}, {}, set()
         for market in MARKETS:
             if gating is None:
-                row[f"Gating {market}"] = GATE_UNKNOWN
-                gate_ranks[market] = GATE_CHECK
+                rank, label = GATE_CHECK, GATE_UNKNOWN
             else:
-                gate_ranks[market] = gating[market]
-                row[f"Gating {market}"] = gating.get(f"{market}_label") or GATE_LABELS[gating[market]]
-            row[f"_gate_{market}"] = gate_ranks[market]
+                rank = gating[market]
+                label = gating.get(f"{market}_label") or GATE_LABELS[rank]
+            # the seller count answers what the sheet doesn't, and is checked
+            # against what it does
+            sig, detail = seller_gate_signal(market_data.get(market, {}).get(it["ean"]))
+            if rank == GATE_CHECK and sig == SIGNAL_COLLAPSED:
+                rank, label = GATE_HARD, GATE_LIKELY_LABEL.format(was=detail)
+            elif rank == GATE_CHECK and sig == SIGNAL_OPEN:
+                label = GATE_OPEN_LABEL.format(n=detail)
+            elif (rank == GATE_HARD and sig == SIGNAL_OPEN
+                    and label != GATE_NO_SELL_LABEL):
+                notes.append(f"{market}: sheet says hard gated but {detail} sellers "
+                             f"sell it now — worth rechecking")
+            elif rank in (GATE_OK, GATE_APPLY) and sig == SIGNAL_COLLAPSED:
+                notes.append(f"{market}: ~{detail:.0f} sellers before, 1 now — "
+                             f"listing may be gated despite the sheet, check")
+            elif sig == SIGNAL_AMAZON_ONLY:
+                notes.append(f"{market}: " + AMAZON_ONLY_NOTE.format(was=detail))
+                amazon_only.add(market)
+            gate_ranks[market], gate_labels[market] = rank, label
+            row[f"Gating {market}"] = label
+            row[f"_gate_{market}"] = rank
         row["_gate"] = min(gate_ranks.values())
 
         # Dangerous-goods class drives the JP additional cost
@@ -1545,11 +1652,15 @@ def build_result_df(items, market_data, matrix, params, skipped_pairs=None,
                 if (it["ean"], market) not in skipped_pairs and gate_ranks[market] != GATE_HARD
                 else None)
             verdicts[market] = market_verdict(
-                d, roi, gate_ranks[market],
-                gate_label=(gating or {}).get(f"{market}_label"))
+                d, roi, gate_ranks[market], gate_label=gate_labels[market])
             # kept per market so results can be split by country downstream
             row[f"Verdict {market}"] = verdicts[market][0]
             row[f"Why {market}"] = verdicts[market][2]
+            if market in amazon_only:     # per-country tabs show Why, not Notes
+                row[f"Why {market}"] = "; ".join(
+                    x for x in (verdicts[market][2],
+                                AMAZON_ONLY_NOTE.format(
+                                    was=seller_gate_signal(d)[1])) if x)
             row[f"Units {market}"] = (round(verdicts[market][1], 1)
                                       if verdicts[market][1] else None)
 
@@ -1560,8 +1671,8 @@ def build_result_df(items, market_data, matrix, params, skipped_pairs=None,
 
         # one verdict per product: the best market wins, and says which
         order = [VERDICT_BUY, VERDICT_SOFT, VERDICT_POSSIBLE, VERDICT_LOW_ROI,
-                 VERDICT_PRICE_GAP, VERDICT_NO_DEMAND, VERDICT_DEAD, VERDICT_GATED,
-                 VERDICT_NO_SELL]
+                 VERDICT_PRICE_GAP, VERDICT_NO_DEMAND, VERDICT_DEAD, VERDICT_LIKELY_GATED,
+                 VERDICT_GATED, VERDICT_NO_SELL]
         best = min(verdicts.items(), key=lambda kv: order.index(kv[1][0])) if verdicts else None
         if best:
             market, (verdict, units, why) = best
