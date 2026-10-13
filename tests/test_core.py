@@ -590,6 +590,94 @@ def test_gated_verdict_distinguishes_our_choice_from_amazons():
     assert core.market_verdict({}, 50, core.GATE_HARD,
                                gate_label=core.GATE_NO_SELL_LABEL)[0] == core.VERDICT_NO_SELL
 
+
+# ─── gating from the seller count ─────────────────────────────────────────────
+
+def test_extract_product_reads_seller_counts():
+    stats = {"current": [-1] * 11 + [4], "avg90": [-1] * 11 + [3.5],
+             "avg180": [-1] * 11 + [-1]}
+    p = core.extract_product({"asin": "A", "eanList": [], "stats": stats})
+    assert p["sellers_now"] == 4 and p["sellers_avg90"] == 3.5
+    assert p["sellers_avg180"] is None                    # -1 = no data
+
+
+def test_seller_gate_signal():
+    sig = core.seller_gate_signal
+    assert sig({"sellers_now": 3}) == (core.SIGNAL_OPEN, 3)
+    assert sig({"sellers_now": 1, "sellers_avg90": 4, "sellers_avg180": 2}) == \
+        (core.SIGNAL_COLLAPSED, 4)
+    assert sig({"sellers_now": 1, "sellers_avg90": 1.2, "sellers_avg180": 1}) == (None, None)
+    assert sig({"sellers_now": 0, "sellers_avg90": 5}) == (None, None)   # nobody selling ≠ gated
+    assert sig({}) == (None, None) and sig(None) == (None, None)
+
+
+def _seller_row(sellers_now, avg90, brand="Unknownbrand", matrix_df=None,
+                amazon_now=False):
+    d = {"asin": "B1", "title": "t", "brand": brand, "eans": ["3386460025508"],
+         "buybox90": 60.0, "new90": None, "rank30": 5000, "offers": sellers_now,
+         "bb_days_30": 100, "rank_drops_30": 20, "rank_drops_90": 60,
+         "sellers_now": sellers_now, "sellers_avg90": avg90, "sellers_avg180": avg90,
+         "amazon_now": amazon_now}
+    items = [{"ean": "3386460025508", "title": "Jimmy Choo EDT 100", "brand": brand,
+              "price_eur": 10.0}]
+    market_data = {m: {"3386460025508": dict(d)} for m in core.MARKETS}
+    matrix = core.matrix_from_df(matrix_df)
+    return core.build_result_df(items, market_data, matrix, P).iloc[0]
+
+
+def test_unknown_brand_several_sellers_is_not_hard_gated():
+    r = _seller_row(5, 5)
+    assert r["Gating UK"].startswith("👥") and "5 sellers" in r["Gating UK"]
+    assert r["Status"] == core.PSTATUS_OPEN
+
+
+def test_unknown_brand_collapsed_to_one_seller_is_likely_gated():
+    r = _seller_row(1, 6)
+    assert r["Gating UK"].startswith("🔒")
+    assert r["Verdict UK"] == core.VERDICT_LIKELY_GATED
+    assert r["Status"] == core.PSTATUS_HARD           # never a buy candidate
+
+
+def test_sheet_wins_but_disagreement_is_flagged():
+    sheet = pd.DataFrame([{"Brand": "Unknownbrand", "US": "ok", "CA": "ok", "UK": "ok",
+                           "AU": "", "JP": "ok", "Notes": ""}])
+    r = _seller_row(1, 6, matrix_df=sheet)
+    assert r["Gating UK"] == core.GATE_LABELS[core.GATE_OK]
+    assert "1 now" in r["Notes"]
+    hard = sheet.assign(UK="Hard Gated")
+    r = _seller_row(5, 5, matrix_df=hard)
+    assert r["Gating UK"] == core.GATE_LABELS[core.GATE_HARD]
+    assert "worth rechecking" in r["Notes"]
+
+
+def test_amazon_as_last_seller_is_a_note_not_gating():
+    assert core.seller_gate_signal({"sellers_now": 1, "sellers_avg90": 5,
+                                    "amazon_now": True})[0] == core.SIGNAL_AMAZON_ONLY
+    r = _seller_row(1, 6, amazon_now=True)
+    assert not r["Gating UK"].startswith("🔒")
+    assert r["Verdict UK"] != core.VERDICT_LIKELY_GATED
+    assert "only Amazon" in r["Why UK"] and "only Amazon" in r["Notes"]
+
+
+def test_offer_brand_kept_when_keepa_title_names_it():
+    d = {"asin": "B1", "title": "Byphasse Activ Protect Elixir 250 ml", "brand": "URBAN SWING",
+         "eans": ["8436097092895"], "buybox90": 20.0, "new90": None, "rank30": 9000,
+         "offers": 1, "bb_days_30": 100, "rank_drops_30": 5, "rank_drops_90": 15}
+    md = {m: {"8436097092895": dict(d)} for m in core.MARKETS}
+    item = {"ean": "8436097092895", "title": "SUBLIM PROTECT 250 ml", "price_eur": 1.55}
+    r = core.build_result_df([dict(item, brand="BYPHASSE")], md, {}, P).iloc[0]
+    assert r["Brand"] == "BYPHASSE"
+    # a sibling whose listing title omits the brand still keeps the offer's brand
+    md2 = {m: {**md[m], "8436097095803": dict(d, title="Caresse Crema De Ducha 1L",
+                                               eans=["8436097095803"])} for m in md}
+    two = [dict(item, brand="BYPHASSE"),
+           {"ean": "8436097095803", "title": "CARESSE 1000 ml", "price_eur": 1.85,
+            "brand": "BYPHASSE"}]
+    assert set(core.build_result_df(two, md2, {}, P)["Brand"]) == {"BYPHASSE"}
+    r = core.build_result_df([dict(item, brand="PERFUMES & SKINCARE")], md, {}, P).iloc[0]
+    assert r["Brand"] == "URBAN SWING"            # offer name isn't a brand — Keepa's wins
+
+
 if __name__ == "__main__":
     failed = 0
     for name, fn in sorted(globals().items()):
