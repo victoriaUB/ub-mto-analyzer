@@ -207,7 +207,7 @@ def format_summary(subject, res):
         lines.append(f"(attachment tabs — {sheets})")
 
     opportunities = df[df["Status"].isin([core.PSTATUS_EXISTING, core.PSTATUS_UNGATING,
-                                          core.PSTATUS_CHECKGATE])]
+                                          core.PSTATUS_OPEN, core.PSTATUS_CHECKGATE])]
     if len(opportunities):
         lines.append("")
         lines.append("*Top ROI:*")
