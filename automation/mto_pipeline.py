@@ -47,8 +47,8 @@ DEFAULT_CHANNEL = "C01V52LDVFW"          # #fb_purchase_es
 # watching the channel. Override with MTO_MENTIONS="U123,U456" (empty = none).
 DEFAULT_MENTIONS = [
     "U0795R217CJ",   # Anastasia Kozyreva
-    "U0550FKCXEX",   # Rita Kanash
-    "U05C2GHL7G8",   # Sonya
+    "U0C3GHYG8R4",   # Arty
+    "U0BG9B2QY9E",   # Misha
     "U02GPSP0AAF",   # Victoria
 ]
 
